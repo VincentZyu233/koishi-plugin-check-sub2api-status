@@ -1,11 +1,17 @@
-import { Context, Schema } from 'koishi'
+import { Context } from 'koishi'
+import {} from 'koishi-plugin-puppeteer'
+
+import { registerStatusCommand } from './command'
+import type { Config as CheckSub2apiStatusConfig } from './config'
+import { Config as ConfigSchema } from './config'
 
 export const name = 'check-sub2api-status'
+export const reusable = true;
 
-export interface Config {}
+export const inject = ['puppeteer']
 
-export const Config: Schema<Config> = Schema.object({})
+export const Config = ConfigSchema
 
-export function apply(ctx: Context, config: Config) {
-  // write your plugin here
+export function apply(ctx: Context, config: CheckSub2apiStatusConfig) {
+  registerStatusCommand(ctx, config)
 }

@@ -6,17 +6,27 @@
   "typings": "lib/index.d.ts",
   "files": [
     "lib",
-    "dist"
+    "dist",
+    "tools"
   ],
   "license": "MIT",
-  "scripts": {},
   "keywords": [
     "chatbot",
     "koishi",
     "plugin"
   ],
-  "devDependencies": {},
+  "koishi": {
+    "service": {
+      "required": [
+        "puppeteer"
+      ]
+    }
+  },
   "peerDependencies": {
     "koishi": "^4.18.7"
+  },
+  "devDependencies": {
+    "koishi-plugin-puppeteer": "^3.9.0",
+    "puppeteer-core": "^22.15.0"
   }
 }

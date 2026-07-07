@@ -16,3 +16,10 @@ tsconfig.tsbuildinfo
 *.ntvs*
 *.njsproj
 *.sln
+
+**/output/
+
+**/tmp/
+**/temp/
+
+/data/
