@@ -4,6 +4,20 @@
 
 检查你的sub2api中转站的状态捏
 
+## 效果预览
+
+### 渠道状态
+
+执行 `sub2api-status` 后返回的渠道状态截图：
+
+![sub2api 渠道状态截图](docs/images/preview/preview.status.png)
+
+### 管理仪表盘趋势
+
+执行 `sub2api-trend` 后返回的默认 `A+B+C` 趋势截图：
+
+![sub2api 管理仪表盘趋势截图](docs/images/preview/preview.trend.png)
+
 ## 思路
 
 sub2api 前端登录态保存在 `localStorage`：
