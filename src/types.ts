@@ -9,6 +9,14 @@ export type LocalStorageKey = typeof LOCAL_STORAGE_KEYS[number]
 export type WaitUntil = 'load' | 'domcontentloaded' | 'networkidle0' | 'networkidle2'
 export type ImageType = 'png' | 'jpeg' | 'webp'
 
+export const TREND_SCREENSHOT_RANGES = {
+  ALL: 'all',
+  CHARTS_AND_RECENT: 'charts-and-recent',
+  RECENT_ONLY: 'recent-only',
+} as const
+
+export type TrendScreenshotRange = typeof TREND_SCREENSHOT_RANGES[keyof typeof TREND_SCREENSHOT_RANGES]
+
 export const CROP_DIRECTIONS = {
   TOP: 'top',
   RIGHT: 'right',

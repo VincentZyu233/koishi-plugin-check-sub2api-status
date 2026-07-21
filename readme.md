@@ -86,6 +86,7 @@ check-sub2api-status:
   statusCommandName: sub2api-status
   enableTrendCommand: false
   trendCommandName: sub2api-trend
+  trendScreenshotRange: all
   sub2apiBaseUrl: http://127.0.0.1:8080
   enableCustomUserAgent: false
   customUserAgent: ''
@@ -121,16 +122,62 @@ check-sub2api-status:
 ## 指令
 
 - `sub2api-status`：截图渠道状态页，默认启用。
-- `sub2api-trend`：截图管理仪表盘中的“最近使用 (Top 12)”组件，默认关闭。启用后会固定使用暗色主题，并以约 1920px 宽度输出图表组件，不依赖整页裁剪参数。
+- `sub2api-trend [num] [unit]`：截图管理仪表盘趋势区域，默认关闭。启用后会固定使用暗色主题，并以宽屏视口输出所选区域，不依赖状态页的整页裁剪参数。
 
 两条指令均可分别通过 `enableStatusCommand`、`enableTrendCommand` 控制是否注册，也可以通过 `statusCommandName`、`trendCommandName` 修改指令名称。
 
 `sub2apiBaseUrl` 只填写服务根地址，例如 `http://192.168.31.25:8080`。插件会为状态指令自动使用 `/monitor`，并为趋势指令自动使用 `/admin/dashboard`。
 
+### 趋势截图范围
+
+`trendScreenshotRange` 是 Koishi 控制台中的单选配置，按管理仪表盘从上到下划分三个连续区域：
+
+- A：时间范围、刷新按钮和统计粒度。
+- B：模型分布与 Token 使用趋势。
+- C：最近使用（Top 12）。
+
+| 配置值 | 截图内容 | 接口与渲染检查 |
+| --- | --- | --- |
+| `all` | A + B + C | 等待仪表盘快照和最近使用接口，并确认三个图表 Canvas 已渲染；这是默认值 |
+| `charts-and-recent` | B + C | 等待仪表盘快照和最近使用接口，并确认三个图表 Canvas 已渲染 |
+| `recent-only` | C | 只等待最近使用接口并确认对应 Canvas 已渲染，效果与旧版本一致 |
+
+插件根据这些 DOM 区域的实时联合边界截图，不使用固定高度。日期文本、图例数量或图表内容变化时，截图边界会随组件尺寸自动调整。如果 sub2api 后续版本改变了仪表盘层级，插件会明确提示找不到所选区域，而不是返回一张错位图片。
+
+### 趋势时间范围参数
+
+趋势指令接受可选的时间数量和单位，例如：
+
+```text
+sub2api-trend
+sub2api-trend 12 h
+sub2api-trend 24 小时
+sub2api-trend 7 d
+sub2api-trend 30 天
+```
+
+- 不传参数时默认使用 `24 hour`。
+- 只传数量时默认使用 `hour`，例如 `sub2api-trend 12` 等同于 `sub2api-trend 12 h`。
+- 小时别名为 `h`、`hr`、`hour`、`hours`、`时`、`小时`，允许范围为 1–168。
+- 天数别名为 `d`、`day`、`days`、`天`、`日`，允许范围为 1–365。
+- 英文单位忽略大小写，数量必须是正整数，参数不合法时不会创建浏览器页面。
+
+`N day` 表示包含今天在内的最近 N 个自然日，并使用 `day` 粒度。`N hour` 会先从当前时间减去 N 小时，再把开始和结束时间转换成 sub2api 接受的日期，并使用 `hour` 粒度。
+
+sub2api 的管理仪表盘接口只接受 `YYYY-MM-DD`，结束日期还会包含完整当天。因此 `6 hour` 可能实际查询今天 00:00 至明天 00:00，跨过午夜时则会覆盖两个完整自然日。这与 sub2api 官方“最近 24 小时”的实现一致，不是严格的滚动 N 小时窗口。
+
+插件通过 sub2api 原生日期输入框和粒度下拉框应用参数，然后等待匹配目标日期与粒度的新接口响应。这样截图 A 区域展示的筛选条件会与 B、C 图表数据保持一致。
+
 ## 开发测试
 
 `test/onboarding-tour.mjs` 保留了新手引导遮罩修复的回归测试。脚本会在内存中打包当前 `src/puppeteer.ts`，使用假 Puppeteer Page 验证引导完成键注入、官方关闭按钮以及失败兜底清理，不会启动浏览器、访问网络、读取真实登录态或生成临时构建文件。
 
+`test/trend-screenshot-range.mjs` 记录了 A、B、C 范围设计，验证三档配置映射、DOM 矩形联合、向外取整、默认完整截图，以及 `config.ts` 的 description emoji 约束。
+
+`test/trend-time-range.mjs` 验证趋势指令的默认时间范围、所有中英文单位别名、自然日计算、大小写兼容和范围限制。
+
 ```powershell
 yarn test:onboarding
+yarn test:trend-range
+yarn test:trend-time
 ```

@@ -1,7 +1,7 @@
 import { Schema } from 'koishi'
 
-import { CROP_DIRECTIONS } from './types'
-import type { CropRule, ImageType, WaitUntil } from './types'
+import { CROP_DIRECTIONS, TREND_SCREENSHOT_RANGES } from './types'
+import type { CropRule, ImageType, TrendScreenshotRange, WaitUntil } from './types'
 
 export interface Config {
   // ===== 📋 指令设置 =====
@@ -9,6 +9,7 @@ export interface Config {
   statusCommandName: string
   enableTrendCommand: boolean
   trendCommandName: string
+  trendScreenshotRange: TrendScreenshotRange
 
   // ===== 💬 消息设置 =====
   enableQuote: boolean
@@ -48,10 +49,21 @@ export const Config: Schema<Config> = Schema.intersect([
       .description('⌨️ sub2api 渠道状态截图指令名称。'),
     enableTrendCommand: Schema.boolean()
       .default(false)
-      .description('📈 是否启用 sub2api 最近使用趋势截图指令。'),
+      .description('📈 是否启用 sub2api 管理仪表盘趋势截图指令。'),
     trendCommandName: Schema.string()
       .default('sub2api-trend')
-      .description('⌨️ sub2api 最近使用趋势截图指令名称。'),
+      .description('⌨️ sub2api 管理仪表盘趋势截图指令名称。'),
+    trendScreenshotRange: Schema.union([
+      Schema.const(TREND_SCREENSHOT_RANGES.ALL)
+        .description('🧩 完整趋势区域（A + B + C）'),
+      Schema.const(TREND_SCREENSHOT_RANGES.CHARTS_AND_RECENT)
+        .description('📊 图表与最近使用（B + C）'),
+      Schema.const(TREND_SCREENSHOT_RANGES.RECENT_ONLY)
+        .description('📉 仅最近使用（C）'),
+    ])
+      .role('radio')
+      .default(TREND_SCREENSHOT_RANGES.ALL)
+      .description('📐 趋势指令截图ui组件的范围。<br>`A 为时间范围`<br>`B 为模型分布与 Token 使用趋势`<br>`C 为最近使用`'),
   }).description('📋 指令设置'),
 
   // ===== 💬 消息设置 =====

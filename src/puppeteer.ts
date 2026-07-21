@@ -4,15 +4,226 @@ import type { Page } from 'puppeteer-core'
 
 import { readAuthState } from './auth'
 import type { Config } from './config'
-import { CROP_DIRECTIONS } from './types'
-import type { AuthState, AuthStorage } from './types'
-import { sleep } from './utils'
+import { CROP_DIRECTIONS, TREND_SCREENSHOT_RANGES } from './types'
+import type { AuthState, AuthStorage, TrendScreenshotRange } from './types'
+import { resolveTrendTimeRange, sleep } from './utils'
+import type { TrendTimeRange } from './utils'
 
 const TREND_VIEWPORT_WIDTH = 2240
 const TREND_VIEWPORT_HEIGHT = 1200
 const TREND_DEVICE_SCALE_FACTOR = 1
 const USERS_TREND_PATH = '/admin/dashboard/users-trend'
+const DASHBOARD_SNAPSHOT_PATH = '/admin/dashboard/snapshot-v2'
 const ONBOARDING_STORAGE_VERSION = 'v4_interactive'
+
+export type TrendScreenshotRegion = 'filter' | 'charts' | 'recent'
+
+export interface TrendScreenshotRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+const TREND_REGION_SELECTORS: Record<TrendScreenshotRegion, string> = {
+  filter: '[data-sub2api-trend-filter="true"]',
+  charts: '[data-sub2api-trend-charts="true"]',
+  recent: '[data-sub2api-trend-card="true"]',
+}
+
+export function resolveTrendScreenshotRegions(
+  range: TrendScreenshotRange | undefined,
+): TrendScreenshotRegion[] {
+  switch (range ?? TREND_SCREENSHOT_RANGES.ALL) {
+    case TREND_SCREENSHOT_RANGES.ALL:
+      return ['filter', 'charts', 'recent']
+    case TREND_SCREENSHOT_RANGES.CHARTS_AND_RECENT:
+      return ['charts', 'recent']
+    case TREND_SCREENSHOT_RANGES.RECENT_ONLY:
+      return ['recent']
+    default:
+      throw new Error(`📐 不支持的趋势截图范围：${String(range)}`)
+  }
+}
+
+export function mergeTrendScreenshotRects(
+  rects: TrendScreenshotRect[],
+): TrendScreenshotRect {
+  if (!rects.length || rects.some(rect => (
+    !Number.isFinite(rect.x)
+    || !Number.isFinite(rect.y)
+    || !Number.isFinite(rect.width)
+    || !Number.isFinite(rect.height)
+    || rect.width <= 0
+    || rect.height <= 0
+  ))) {
+    throw new Error('📐 趋势截图区域尺寸无效。')
+  }
+
+  const left = Math.min(...rects.map(rect => rect.x))
+  const top = Math.min(...rects.map(rect => rect.y))
+  const right = Math.max(...rects.map(rect => rect.x + rect.width))
+  const bottom = Math.max(...rects.map(rect => rect.y + rect.height))
+  const x = Math.max(0, Math.floor(left))
+  const y = Math.max(0, Math.floor(top))
+
+  return {
+    x,
+    y,
+    width: Math.ceil(right) - x,
+    height: Math.ceil(bottom) - y,
+  }
+}
+
+async function waitForRenderableCanvases(
+  page: Page,
+  selector: string,
+  minimumCount: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  return page.waitForFunction(({
+    selector,
+    minimumCount,
+  }: {
+    selector: string
+    minimumCount: number
+  }) => {
+    const element = document.querySelector(selector)
+    if (!element) return false
+
+    const renderableCount = Array.from(element.querySelectorAll('canvas'))
+      .filter(canvas => canvas.width > 0 && canvas.height > 0)
+      .length
+    return renderableCount >= minimumCount
+  }, { timeout: timeoutMs }, { selector, minimumCount }).then(async (handle) => {
+    await handle.dispose()
+    return true
+  }).catch(() => false)
+}
+
+async function waitForTrendApiResponses(
+  page: Page,
+  timeoutMs: number,
+  includesCharts: boolean,
+  expectedRange: TrendTimeRange | undefined,
+  trigger: () => Promise<unknown>,
+): Promise<void> {
+  const authFailureResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'POST'
+      && url.pathname.endsWith('/auth/refresh')
+      && (response.status() === 401 || response.status() === 403)
+  }, { timeout: timeoutMs }).then(response => ({
+    kind: 'auth' as const,
+    response,
+  }))
+  const requiredResponseSpecs = [
+    { name: '最近使用趋势', pathname: USERS_TREND_PATH },
+    ...(includesCharts
+      ? [{ name: '模型分布与 Token 使用趋势', pathname: DASHBOARD_SNAPSHOT_PATH }]
+      : []),
+  ]
+  const requiredResponseResults = requiredResponseSpecs.map(({ name, pathname }) => {
+    const requiredResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url())
+      const matchesRange = !expectedRange || (
+        url.searchParams.get('start_date') === expectedRange.startDate
+        && url.searchParams.get('end_date') === expectedRange.endDate
+        && url.searchParams.get('granularity') === expectedRange.granularity
+      )
+      return response.request().method() === 'GET'
+        && url.pathname.endsWith(pathname)
+        && matchesRange
+    }, { timeout: timeoutMs }).then(response => ({
+      kind: 'required' as const,
+      name,
+      response,
+    }))
+
+    return Promise.race([requiredResponse, authFailureResponse])
+  })
+
+  await trigger()
+
+  const responseResults = await Promise
+    .all(requiredResponseResults)
+    .catch(() => null)
+  if (!responseResults) {
+    const rangeLabel = expectedRange
+      ? `${expectedRange.num} ${expectedRange.granularity}`
+      : includesCharts ? '仪表盘趋势' : '最近使用趋势'
+    throw new Error(`📈 等待 ${rangeLabel} 接口响应超时。`)
+  }
+  if (responseResults.some(result => result.kind === 'auth')) {
+    throw new Error('🔐 sub2api 登录态已经失效，请重新导出登录态。')
+  }
+
+  for (const result of responseResults) {
+    if (result.kind !== 'required') continue
+    const status = result.response.status()
+    if (status === 401 || status === 403) {
+      throw new Error(`🔐 sub2api 返回 ${status}，当前登录态无权访问管理仪表盘或已经失效。`)
+    }
+    if (status >= 400) {
+      throw new Error(`📡 ${result.name}接口返回 HTTP ${status}。`)
+    }
+  }
+}
+
+export async function applyTrendTimeRange(
+  page: Page,
+  range: TrendTimeRange,
+  timeoutMs: number,
+): Promise<void> {
+  const filterSelector = TREND_REGION_SELECTORS.filter
+  const dateTriggerSelector = `${filterSelector} .date-picker-trigger`
+  const dateInputsSelector = `${filterSelector} input[type="date"]`
+  const dateApplySelector = `${filterSelector} .date-picker-apply`
+  const granularityTriggerSelector = `${filterSelector} button[aria-label="Select option"]`
+  const granularityOptionsSelector = '.select-dropdown-portal [role="option"]'
+
+  await page.click(dateTriggerSelector)
+  await page.waitForSelector(dateInputsSelector, { timeout: timeoutMs })
+  const inputCount = await page.$$eval(dateInputsSelector, (inputs, values) => {
+    const [startInput, endInput] = inputs as HTMLInputElement[]
+    if (!startInput || !endInput) return inputs.length
+
+    startInput.value = values.startDate
+    startInput.dispatchEvent(new Event('input', { bubbles: true }))
+    startInput.dispatchEvent(new Event('change', { bubbles: true }))
+    endInput.value = values.endDate
+    endInput.dispatchEvent(new Event('input', { bubbles: true }))
+    endInput.dispatchEvent(new Event('change', { bubbles: true }))
+    return inputs.length
+  }, {
+    startDate: range.startDate,
+    endDate: range.endDate,
+  })
+  if (inputCount < 2) {
+    throw new Error('📅 找不到 sub2api 日期范围输入框。')
+  }
+  await page.click(dateApplySelector)
+
+  await page.click(granularityTriggerSelector)
+  await page.waitForSelector(granularityOptionsSelector, { timeout: timeoutMs })
+  const options = await page.$$(granularityOptionsSelector)
+  const desiredIndex = range.granularity === 'day' ? 0 : 1
+  const desiredOption = options[desiredIndex]
+  if (!desiredOption) {
+    await Promise.all(options.map(option => option.dispose().catch(() => undefined)))
+    throw new Error('🕒 找不到 sub2api day/hour 粒度选项。')
+  }
+
+  const alreadySelected = await desiredOption.evaluate((element) => {
+    return element.getAttribute('aria-selected') === 'true'
+  })
+  if (alreadySelected) {
+    await page.click(granularityTriggerSelector)
+  } else {
+    await desiredOption.click()
+  }
+  await Promise.all(options.map(option => option.dispose().catch(() => undefined)))
+}
 
 function toImageBuffer(rawImage: unknown): Buffer {
   if (typeof rawImage === 'string') return Buffer.from(rawImage, 'base64')
@@ -278,7 +489,15 @@ export async function captureStatusScreenshot(ctx: Context, config: Config): Pro
   }
 }
 
-export async function captureTrendScreenshot(ctx: Context, config: Config): Promise<Buffer> {
+export async function captureTrendScreenshot(
+  ctx: Context,
+  config: Config,
+  num?: number,
+  unit?: string,
+): Promise<Buffer> {
+  const timeRange = resolveTrendTimeRange(num, unit)
+  const screenshotRegions = resolveTrendScreenshotRegions(config.trendScreenshotRange)
+  const includesCharts = screenshotRegions.includes('charts')
   const page = await ctx.puppeteer.page()
 
   try {
@@ -290,46 +509,16 @@ export async function captureTrendScreenshot(ctx: Context, config: Config): Prom
     })
     await prepareAuthenticatedPage(page, config, true)
 
-    const usersTrendResponse = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'GET'
-        && url.pathname.endsWith(USERS_TREND_PATH)
-    }, { timeout: config.navigationTimeoutMs }).then(response => ({
-      kind: 'trend' as const,
-      response,
-    }))
-    const authFailureResponse = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'POST'
-        && url.pathname.endsWith('/auth/refresh')
-        && (response.status() === 401 || response.status() === 403)
-    }, { timeout: config.navigationTimeoutMs }).then(response => ({
-      kind: 'auth' as const,
-      response,
-    }))
-
-    await page.goto(dashboardUrl, {
-      waitUntil: config.waitUntil,
-      timeout: config.navigationTimeoutMs,
-    })
-
-    const responseResult = await Promise
-      .race([usersTrendResponse, authFailureResponse])
-      .catch(() => null)
-    if (!responseResult) {
-      throw new Error('📈 等待最近使用趋势接口超时。')
-    }
-    if (responseResult.kind === 'auth') {
-      throw new Error('🔐 sub2api 登录态已经失效，请重新导出登录态。')
-    }
-
-    const { response } = responseResult
-    if (response.status() === 401 || response.status() === 403) {
-      throw new Error(`🔐 sub2api 返回 ${response.status()}，当前登录态无权访问管理仪表盘或已经失效。`)
-    }
-    if (response.status() >= 400) {
-      throw new Error(`📡 最近使用趋势接口返回 HTTP ${response.status()}。`)
-    }
+    await waitForTrendApiResponses(
+      page,
+      config.navigationTimeoutMs,
+      includesCharts,
+      undefined,
+      () => page.goto(dashboardUrl, {
+        waitUntil: config.waitUntil,
+        timeout: config.navigationTimeoutMs,
+      }),
+    )
 
     await page.waitForFunction(() => {
       const headings = Array.from(document.querySelectorAll('h3'))
@@ -340,7 +529,11 @@ export async function captureTrendScreenshot(ctx: Context, config: Config): Prom
       const card = heading?.closest('.card')
       if (!card) return false
 
+      const charts = card.previousElementSibling
+      const filter = charts?.previousElementSibling
       card.setAttribute('data-sub2api-trend-card', 'true')
+      charts?.setAttribute('data-sub2api-trend-charts', 'true')
+      filter?.setAttribute('data-sub2api-trend-filter', 'true')
       return true
     }, { timeout: config.navigationTimeoutMs })
 
@@ -352,26 +545,84 @@ export async function captureTrendScreenshot(ctx: Context, config: Config): Prom
       throw new Error('🚪 页面跳到了 /login，说明 localStorage 登录态没有生效。')
     }
 
+    await waitForTrendApiResponses(
+      page,
+      config.navigationTimeoutMs,
+      includesCharts,
+      timeRange,
+      () => applyTrendTimeRange(page, timeRange, config.navigationTimeoutMs),
+    )
+    await sleep(Math.max(config.waitAfterLoadedMs, 1200))
+
     const trendCard = await page.$('[data-sub2api-trend-card="true"]')
     if (!trendCard) {
       throw new Error('🎯 找不到最近使用趋势图表组件。')
     }
-    const hasRenderableCanvas = await trendCard.evaluate((element) => {
-      const canvas = element.querySelector('canvas')
-      return Boolean(canvas && canvas.width > 0 && canvas.height > 0)
-    })
+    const canvasWaitTimeoutMs = Math.min(config.navigationTimeoutMs, 10000)
+    const hasRenderableCanvas = await waitForRenderableCanvases(
+      page,
+      TREND_REGION_SELECTORS.recent,
+      1,
+      canvasWaitTimeoutMs,
+    )
     if (!hasRenderableCanvas) {
       throw new Error('📭 最近使用趋势暂无数据。')
     }
 
+    if (includesCharts) {
+      const charts = await page.$(TREND_REGION_SELECTORS.charts)
+      if (!charts) {
+        throw new Error('🎯 找不到模型分布与 Token 使用趋势区域。')
+      }
+      const hasRenderableCharts = await waitForRenderableCanvases(
+        page,
+        TREND_REGION_SELECTORS.charts,
+        2,
+        canvasWaitTimeoutMs,
+      )
+      if (!hasRenderableCharts) {
+        throw new Error('📭 模型分布或 Token 使用趋势暂无可截图数据。')
+      }
+    }
+
+    const regionRects = await page.evaluate(({
+      regions,
+      selectors,
+    }: {
+      regions: TrendScreenshotRegion[]
+      selectors: Record<TrendScreenshotRegion, string>
+    }) => {
+      return regions.map((region) => {
+        const element = document.querySelector(selectors[region])
+        if (!element) return null
+
+        const rect = element.getBoundingClientRect()
+        return {
+          x: rect.left + window.scrollX,
+          y: rect.top + window.scrollY,
+          width: rect.width,
+          height: rect.height,
+        }
+      })
+    }, {
+      regions: screenshotRegions,
+      selectors: TREND_REGION_SELECTORS,
+    })
+    if (regionRects.some(rect => rect === null)) {
+      throw new Error('🎯 找不到所选的完整趋势截图区域，sub2api 页面结构可能已经变化。')
+    }
+    const clip = mergeTrendScreenshotRects(regionRects as TrendScreenshotRect[])
+
     const screenshotOptions: any = {
       type: config.imageType,
+      clip,
+      captureBeyondViewport: true,
     }
     if (config.imageType !== 'png') {
       screenshotOptions.quality = config.imageQuality
     }
 
-    return toImageBuffer(await trendCard.screenshot(screenshotOptions))
+    return toImageBuffer(await page.screenshot(screenshotOptions))
   } finally {
     await page.close().catch(() => undefined)
   }

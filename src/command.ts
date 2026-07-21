@@ -9,7 +9,7 @@ interface ScreenshotCommandOptions {
   description: string
   waitingText: string
   logName: string
-  capture: () => Promise<Buffer>
+  capture: (...args: any[]) => Promise<Buffer>
 }
 
 function registerScreenshotCommand(
@@ -20,7 +20,7 @@ function registerScreenshotCommand(
   const logger = ctx.logger('check-sub2api-status')
 
   ctx.command(options.commandName, options.description)
-    .action(async ({ session }) => {
+    .action(async ({ session }, ...args) => {
       let waitingHintMsgId: string | undefined
 
       try {
@@ -35,7 +35,7 @@ function registerScreenshotCommand(
           waitingHintMsgId = sentIds[0]
         }
 
-        const image = await options.capture()
+        const image = await options.capture(...args)
         if (config.verboseLog) {
           logger.info(`${options.logName} screenshot ok: ${image.length} bytes`)
         }
@@ -59,7 +59,7 @@ export function registerStatusCommand(ctx: Context, config: Config): void {
   registerScreenshotCommand(ctx, config, {
     commandName: config.statusCommandName,
     description: '截图 sub2api 渠道状态页',
-    waitingText: '📡 获取 sub2api 状态中，请稍后... ⏳',
+    waitingText: '📡 获取 sub2api 上游渠道状态中，请稍后... ⏳',
     logName: 'sub2api monitor',
     capture: () => captureStatusScreenshot(ctx, config),
   })
@@ -67,10 +67,15 @@ export function registerStatusCommand(ctx: Context, config: Config): void {
 
 export function registerTrendCommand(ctx: Context, config: Config): void {
   registerScreenshotCommand(ctx, config, {
-    commandName: config.trendCommandName,
-    description: '截图 sub2api 最近使用趋势',
-    waitingText: '📈 获取 sub2api 最近使用趋势中，请稍后... ⏳',
+    commandName: `${config.trendCommandName} [num:number] [unit:string]`,
+    description: [
+      '📈📅 截图 sub2api 管理仪表盘趋势。',
+      'num：正整数；hour 范围 1–168，day 范围 1–365。',
+      'unit：h/hr/hour/hours/时/小时，或 d/day/days/天/日；英文忽略大小写。',
+      '默认：不传参数时为 24 hour，只传 num 时 unit 默认为 hour。',
+    ].join('\n'),
+    waitingText: '📈 获取 sub2api 管理仪表盘趋势中，请稍后... ⏳',
     logName: 'sub2api trend',
-    capture: () => captureTrendScreenshot(ctx, config),
+    capture: (num?: number, unit?: string) => captureTrendScreenshot(ctx, config, num, unit),
   })
 }
