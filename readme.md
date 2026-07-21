@@ -45,7 +45,10 @@ python .\external\check-sub2api-status\tools\export-auth-state.py `
 
 ```yaml
 check-sub2api-status:
-  commandName: sub2api-status
+  enableStatusCommand: true
+  statusCommandName: sub2api-status
+  enableTrendCommand: false
+  trendCommandName: trend
   monitorUrl: http://127.0.0.1:8080/monitor
   authStateJson: |
     {
@@ -61,3 +64,10 @@ check-sub2api-status:
 ```
 
 把导出脚本控制台打印的完整 JSON 粘到 `authStateJson` 即可。导出的 token 属于敏感信息，`tools/output` 默认会忽略 JSON 文件，不建议提交到仓库。
+
+## 指令
+
+- `sub2api-status`：截图渠道状态页，默认启用。
+- `trend`：截图管理仪表盘中的“最近使用 (Top 12)”组件，默认关闭。启用后会固定使用暗色主题，并以约 1920px 宽度输出图表组件，不依赖整页裁剪参数。
+
+两条指令均可分别通过 `enableStatusCommand`、`enableTrendCommand` 控制是否注册，也可以通过 `statusCommandName`、`trendCommandName` 修改指令名称。

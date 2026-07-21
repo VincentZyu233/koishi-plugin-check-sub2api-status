@@ -5,7 +5,10 @@ import type { CropRule, ImageType, WaitUntil } from './types'
 
 export interface Config {
   // ===== 📋 指令设置 =====
-  commandName: string
+  enableStatusCommand: boolean
+  statusCommandName: string
+  enableTrendCommand: boolean
+  trendCommandName: string
 
   // ===== 💬 消息设置 =====
   enableQuote: boolean
@@ -35,9 +38,18 @@ export interface Config {
 export const Config: Schema<Config> = Schema.intersect([
   // ===== 📋 指令设置 =====
   Schema.object({
-    commandName: Schema.string()
+    enableStatusCommand: Schema.boolean()
+      .default(true)
+      .description('📡 是否启用 sub2api 渠道状态截图指令。'),
+    statusCommandName: Schema.string()
       .default('sub2api-status')
-      .description('⌨️ 触发截图的指令名'),
+      .description('⌨️ sub2api 渠道状态截图指令名称。'),
+    enableTrendCommand: Schema.boolean()
+      .default(false)
+      .description('📈 是否启用 sub2api 最近使用趋势截图指令。'),
+    trendCommandName: Schema.string()
+      .default('trend')
+      .description('⌨️ sub2api 最近使用趋势截图指令名称。'),
   }).description('📋 指令设置'),
 
   // ===== 💬 消息设置 =====

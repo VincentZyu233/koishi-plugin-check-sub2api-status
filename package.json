@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-check-sub2api-status",
   "description": "检查你的sub2api中转站的状态捏",
-  "version": "0.0.1",
+  "version": "0.1.0-alpha.2+20260722",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [

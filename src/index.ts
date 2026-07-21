@@ -1,7 +1,7 @@
 import { Context } from 'koishi'
 import {} from 'koishi-plugin-puppeteer'
 
-import { registerStatusCommand } from './command'
+import { registerStatusCommand, registerTrendCommand } from './command'
 import type { Config as CheckSub2apiStatusConfig } from './config'
 import { Config as ConfigSchema } from './config'
 
@@ -13,5 +13,6 @@ export const inject = ['puppeteer']
 export const Config = ConfigSchema
 
 export function apply(ctx: Context, config: CheckSub2apiStatusConfig) {
-  registerStatusCommand(ctx, config)
+  if (config.enableStatusCommand) registerStatusCommand(ctx, config)
+  if (config.enableTrendCommand) registerTrendCommand(ctx, config)
 }
