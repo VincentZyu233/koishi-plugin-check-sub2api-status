@@ -5,13 +5,14 @@ import type { Page } from 'puppeteer-core'
 import { readAuthState } from './auth'
 import type { Config } from './config'
 import { CROP_DIRECTIONS } from './types'
-import type { AuthStorage } from './types'
+import type { AuthState, AuthStorage } from './types'
 import { sleep } from './utils'
 
 const TREND_VIEWPORT_WIDTH = 2240
 const TREND_VIEWPORT_HEIGHT = 1200
 const TREND_DEVICE_SCALE_FACTOR = 1
 const USERS_TREND_PATH = '/admin/dashboard/users-trend'
+const ONBOARDING_STORAGE_VERSION = 'v4_interactive'
 
 function toImageBuffer(rawImage: unknown): Buffer {
   if (typeof rawImage === 'string') return Buffer.from(rawImage, 'base64')
@@ -19,12 +20,49 @@ function toImageBuffer(rawImage: unknown): Buffer {
   return Buffer.from(rawImage as Uint8Array)
 }
 
-function getDashboardUrl(monitorUrl: string): string {
-  const url = new URL(monitorUrl)
-  url.pathname = '/admin/dashboard'
+function getSub2apiPageUrl(baseUrl: string, pathname: string): string {
+  const url = new URL(baseUrl.trim())
+  url.pathname = pathname
   url.search = ''
   url.hash = ''
   return url.toString()
+}
+
+function parseOrigin(value: string, fieldName: string): string {
+  try {
+    return new URL(value.trim()).origin
+  } catch {
+    throw new Error(`🌐 ${fieldName} 不是有效 URL：${value}`)
+  }
+}
+
+function validateAuthOrigin(authState: AuthState, baseUrl: string): void {
+  const authOrigin = parseOrigin(authState.origin, 'authStateJson.origin')
+  const configuredOrigin = parseOrigin(baseUrl, 'sub2apiBaseUrl')
+  if (authOrigin !== configuredOrigin) {
+    throw new Error(`🛡️ 登录态 Origin 与 sub2apiBaseUrl 不一致：${authOrigin} ≠ ${configuredOrigin}。已阻止请求，请使用相同地址重新导出登录态。`)
+  }
+}
+
+function resolveUserAgent(config: Config, authState: AuthState): string {
+  const sourceName = config.enableCustomUserAgent
+    ? 'customUserAgent'
+    : 'authStateJson.userAgent'
+  const candidate = config.enableCustomUserAgent
+    ? config.customUserAgent
+    : authState.userAgent
+  const userAgent = typeof candidate === 'string' ? candidate.trim() : ''
+
+  if (!userAgent) {
+    if (config.enableCustomUserAgent) {
+      throw new Error('🏷️ 已启用自定义 User-Agent，但 customUserAgent 为空。')
+    }
+    throw new Error('🏷️ authStateJson 缺少 userAgent。请用最新脚本重新导出，或启用自定义 User-Agent。')
+  }
+  if (/[\r\n]/.test(userAgent)) {
+    throw new Error(`🏷️ ${sourceName} 不能包含换行符。`)
+  }
+  return userAgent
 }
 
 function getCropMargins(config: Config) {
@@ -59,11 +97,29 @@ async function injectAuthStorage(
   authStorage: AuthStorage,
   forceDarkTheme = false,
 ): Promise<void> {
-  await page.evaluateOnNewDocument(({ entries, forceDarkTheme }) => {
+  await page.evaluateOnNewDocument(({
+    entries,
+    forceDarkTheme,
+    onboardingStorageVersion,
+  }) => {
     for (const [key, value] of Object.entries(entries)) {
       if (value !== undefined && value !== null) {
         localStorage.setItem(key, String(value))
       }
+    }
+
+    try {
+      const authUser = JSON.parse(entries.auth_user)
+      const userId = String(authUser?.id ?? '').trim()
+      const role = authUser?.role === 'admin' ? 'admin' : 'user'
+      if (userId) {
+        localStorage.setItem(
+          `${role}_guide_${userId}_${role}_${onboardingStorageVersion}`,
+          'true',
+        )
+      }
+    } catch {
+      // Invalid auth_user is handled by the application auth flow.
     }
 
     if (!forceDarkTheme) return
@@ -73,20 +129,78 @@ async function injectAuthStorage(
       attributes: true,
       attributeFilter: ['class'],
     })
-  }, { entries: authStorage, forceDarkTheme })
+  }, {
+    entries: authStorage,
+    forceDarkTheme,
+    onboardingStorageVersion: ONBOARDING_STORAGE_VERSION,
+  })
+}
+
+async function dismissOnboardingTour(page: Page): Promise<void> {
+  const hasTour = await page.evaluate(() => {
+    return Boolean(document.querySelector('.driver-popover, .driver-overlay'))
+  })
+  if (!hasTour) return
+
+  let closeTriggered = false
+  const closeButton = await page.$('.driver-popover-close-btn')
+  if (closeButton) {
+    try {
+      await closeButton.click()
+      closeTriggered = true
+    } catch {
+      // Fall back to the tour's Escape handler below.
+    } finally {
+      await closeButton.dispose().catch(() => undefined)
+    }
+  }
+  if (!closeTriggered) {
+    await page.keyboard.press('Escape').catch(() => undefined)
+  }
+
+  const dismissed = await page.waitForFunction(() => {
+    return !document.querySelector('.driver-popover, .driver-overlay')
+  }, { timeout: 2000 }).then(async (handle) => {
+    await handle.dispose()
+    return true
+  }).catch(() => false)
+  if (dismissed) return
+
+  // The page is disposable; remove stale driver.js artifacts if its own close path failed.
+  await page.evaluate(() => {
+    document.querySelectorAll('.driver-popover, .driver-overlay').forEach(node => node.remove())
+    document.documentElement.classList.remove('driver-active')
+    document.body?.classList.remove('driver-active')
+    document
+      .querySelectorAll('.driver-active-element, .driver-no-interaction')
+      .forEach((element) => {
+        element.classList.remove('driver-active-element', 'driver-no-interaction')
+      })
+  })
+}
+
+async function prepareAuthenticatedPage(
+  page: Page,
+  config: Config,
+  forceDarkTheme = false,
+): Promise<void> {
+  const authState = await readAuthState(config)
+  validateAuthOrigin(authState, config.sub2apiBaseUrl)
+  await page.setUserAgent(resolveUserAgent(config, authState))
+  await injectAuthStorage(page, authState.storage, forceDarkTheme)
 }
 
 export async function captureStatusScreenshot(ctx: Context, config: Config): Promise<Buffer> {
   const page = await ctx.puppeteer.page()
 
   try {
-    const authStorage = await readAuthState(config)
+    const statusPageUrl = getSub2apiPageUrl(config.sub2apiBaseUrl, '/monitor')
     await page.setViewport({
       width: config.viewportWidth,
       height: config.viewportHeight,
       deviceScaleFactor: config.deviceScaleFactor,
     })
-    await injectAuthStorage(page, authStorage)
+    await prepareAuthenticatedPage(page, config)
 
     const channelMonitorResponse = page.waitForResponse((response) => {
       const url = response.url()
@@ -95,7 +209,7 @@ export async function captureStatusScreenshot(ctx: Context, config: Config): Pro
         && !url.includes('/admin/')
     }, { timeout: config.navigationTimeoutMs }).catch(() => null)
 
-    await page.goto(config.monitorUrl.trim(), {
+    await page.goto(statusPageUrl, {
       waitUntil: config.waitUntil,
       timeout: config.navigationTimeoutMs,
     })
@@ -109,6 +223,7 @@ export async function captureStatusScreenshot(ctx: Context, config: Config): Pro
     }
 
     await sleep(config.waitAfterLoadedMs)
+    await dismissOnboardingTour(page)
 
     const currentPath = await page.evaluate(() => location.pathname)
     if (currentPath.startsWith('/login')) {
@@ -167,14 +282,13 @@ export async function captureTrendScreenshot(ctx: Context, config: Config): Prom
   const page = await ctx.puppeteer.page()
 
   try {
-    const authStorage = await readAuthState(config)
-    const dashboardUrl = getDashboardUrl(config.monitorUrl.trim())
+    const dashboardUrl = getSub2apiPageUrl(config.sub2apiBaseUrl, '/admin/dashboard')
     await page.setViewport({
       width: TREND_VIEWPORT_WIDTH,
       height: TREND_VIEWPORT_HEIGHT,
       deviceScaleFactor: TREND_DEVICE_SCALE_FACTOR,
     })
-    await injectAuthStorage(page, authStorage, true)
+    await prepareAuthenticatedPage(page, config, true)
 
     const usersTrendResponse = page.waitForResponse((response) => {
       const url = new URL(response.url())
@@ -231,6 +345,7 @@ export async function captureTrendScreenshot(ctx: Context, config: Config): Prom
     }, { timeout: config.navigationTimeoutMs })
 
     await sleep(Math.max(config.waitAfterLoadedMs, 1200))
+    await dismissOnboardingTour(page)
 
     const currentPath = await page.evaluate(() => location.pathname)
     if (currentPath.startsWith('/login')) {

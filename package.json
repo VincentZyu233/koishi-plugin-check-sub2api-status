@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-check-sub2api-status",
   "description": "检查你的sub2api中转站的状态捏",
-  "version": "0.1.0-alpha.2+20260722",
+  "version": "0.1.2-alpha.4+20260722",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -9,6 +9,9 @@
     "dist",
     "tools"
   ],
+  "scripts": {
+    "test:onboarding": "node test/onboarding-tour.mjs"
+  },
   "license": "MIT",
   "keywords": [
     "chatbot",
@@ -26,6 +29,7 @@
     "koishi": "^4.18.7"
   },
   "devDependencies": {
+    "esbuild": "^0.23.1",
     "koishi-plugin-puppeteer": "^3.9.0",
     "puppeteer-core": "^22.15.0"
   }

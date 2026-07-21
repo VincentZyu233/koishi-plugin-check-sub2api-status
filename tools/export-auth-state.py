@@ -4,14 +4,18 @@
 #
 #   python tools/export-auth-state.py --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 #
-# 常用参数:
-#   --url "http://127.0.0.1:8080/monitor"
-#   --out "tools/output/sub2api-auth-state-YYYYMMDD-HHMMSS.json"
-#   --profile "data/sub2api-auth-profile-py"
-#   --keep-open
+# 参数及默认值:
+#   --browser  默认依次读取 CHROME_PATH、PUPPETEER_EXECUTABLE_PATH；均未设置时必须传入
+#   --url      默认 "http://127.0.0.1:8080/monitor"
+#   --profile  默认 "data/sub2api-auth-profile-py"（相对于当前工作目录）
+#   --out      默认 "tools/output/sub2api-auth-state-YYYYMMDD-HHMMSS.json"（相对于脚本目录）
+#   --timeout  默认 600000 毫秒（10 分钟）
+#   --port     默认 0（自动选择空闲端口）
+#   --profile-mode 默认 "temporary"，可选 temporary/reuse/reset/open
 #
 # 脚本会打开一个独立浏览器窗口；如果没登录，就在窗口里登录 sub2api。
-# 识别到 localStorage 里的 auth_token + auth_user 后，会导出 Koishi 插件可直接读取的 JSON。
+# 识别到 localStorage 里的 auth_token + auth_user 后，会连同 Origin 和 User-Agent
+# 导出 Koishi 插件可直接读取的 JSON。
 
 import argparse
 import base64
@@ -21,6 +25,7 @@ import http.client
 import json
 import os
 import random
+import shutil
 import socket
 import struct
 import subprocess
@@ -40,6 +45,11 @@ STORAGE_KEYS = [
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+DEFAULT_PROFILE_DIR = os.path.abspath("data/sub2api-auth-profile-py")
+PROFILE_MARKER_NAME = ".sub2api-auth-profile"
+PROFILE_MODES = ("temporary", "reuse", "reset", "open")
+PROFILE_CLEANUP_TIMEOUT_SECONDS = 5.0
+PROFILE_CLEANUP_RETRY_SECONDS = 0.25
 ANSI_ENABLED = not os.environ.get("NO_COLOR")
 
 
@@ -254,19 +264,25 @@ def parse_args() -> argparse.Namespace:
         "-b",
         "--browser",
         default=os.environ.get("CHROME_PATH") or os.environ.get("PUPPETEER_EXECUTABLE_PATH") or "",
-        help="Chrome/Chromium executable path. Required unless CHROME_PATH is set.",
+        help="Chrome/Chromium executable path. Defaults to CHROME_PATH or PUPPETEER_EXECUTABLE_PATH.",
     )
     parser.add_argument(
         "-u",
         "--url",
         default="http://127.0.0.1:8080/monitor",
-        help="sub2api monitor URL.",
+        help="sub2api monitor URL. Default: http://127.0.0.1:8080/monitor",
     )
     parser.add_argument(
         "-p",
         "--profile",
-        default=os.path.abspath("data/sub2api-auth-profile-py"),
-        help="Dedicated browser profile dir.",
+        default=DEFAULT_PROFILE_DIR,
+        help="Dedicated browser profile dir. Default: ./data/sub2api-auth-profile-py",
+    )
+    parser.add_argument(
+        "--profile-mode",
+        choices=PROFILE_MODES,
+        default="temporary",
+        help="Profile lifecycle mode. Default: temporary.",
     )
     parser.add_argument(
         "-o",
@@ -278,18 +294,13 @@ def parse_args() -> argparse.Namespace:
         "--timeout",
         type=int,
         default=600_000,
-        help="Wait timeout in milliseconds.",
+        help="Wait timeout in milliseconds. Default: 600000.",
     )
     parser.add_argument(
         "--port",
         type=int,
         default=0,
         help="Chrome remote debugging port. Default: auto.",
-    )
-    parser.add_argument(
-        "--keep-open",
-        action="store_true",
-        help="Do not close the browser after export.",
     )
     return parser.parse_args()
 
@@ -374,6 +385,93 @@ def default_out_path() -> str:
     return os.path.join(OUTPUT_DIR, f"sub2api-auth-state-{file_timestamp()}.json")
 
 
+def normalize_compare_path(value: str) -> str:
+    return os.path.normcase(os.path.realpath(os.path.abspath(value)))
+
+
+def is_same_or_parent_path(candidate: str, target: str) -> bool:
+    try:
+        return os.path.commonpath([candidate, target]) == candidate
+    except ValueError:
+        return False
+
+
+def validate_profile_path(profile_path: str) -> None:
+    normalized = normalize_compare_path(profile_path)
+    drive, _ = os.path.splitdrive(normalized)
+    root_path = normalize_compare_path(f"{drive}{os.sep}" if drive else os.path.abspath(os.sep))
+    if normalized == root_path:
+        raise RuntimeError(f"🛑 Refusing to manage filesystem root as profile path: {profile_path}")
+
+    protected_paths = [
+        normalize_compare_path(os.getcwd()),
+        normalize_compare_path(os.path.expanduser("~")),
+        normalize_compare_path(SCRIPT_DIR),
+    ]
+    if any(is_same_or_parent_path(normalized, protected) for protected in protected_paths):
+        raise RuntimeError(f"🛑 Refusing to manage unsafe profile path: {profile_path}")
+
+    if not os.path.lexists(profile_path):
+        return
+    is_junction = getattr(os.path, "isjunction", lambda _: False)
+    if os.path.islink(profile_path) or is_junction(profile_path):
+        raise RuntimeError(f"🛑 Refusing to manage linked profile path: {profile_path}")
+    if not os.path.isdir(profile_path):
+        raise RuntimeError(f"🛑 Profile path exists but is not a directory: {profile_path}")
+
+
+def profile_is_script_owned(profile_path: str) -> bool:
+    if normalize_compare_path(profile_path) == normalize_compare_path(DEFAULT_PROFILE_DIR):
+        return True
+    return os.path.isfile(os.path.join(profile_path, PROFILE_MARKER_NAME))
+
+
+def clear_profile(profile_path: str) -> None:
+    validate_profile_path(profile_path)
+    if not os.path.exists(profile_path):
+        return
+    if not profile_is_script_owned(profile_path):
+        raise RuntimeError(
+            f"🛑 Refusing to delete unmarked profile directory: {profile_path}. "
+            f"Missing {PROFILE_MARKER_NAME}.",
+        )
+
+    deadline = time.monotonic() + PROFILE_CLEANUP_TIMEOUT_SECONDS
+    while True:
+        try:
+            shutil.rmtree(profile_path)
+            break
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"🧹 Failed to delete profile directory {profile_path}: {exc}") from exc
+            time.sleep(PROFILE_CLEANUP_RETRY_SECONDS)
+    if os.path.exists(profile_path):
+        raise RuntimeError(f"🧹 Profile directory still exists after cleanup: {profile_path}")
+
+
+def prepare_profile(profile_path: str, profile_mode: str) -> None:
+    validate_profile_path(profile_path)
+    if profile_mode in ("temporary", "reset"):
+        clear_profile(profile_path)
+
+    existed = os.path.exists(profile_path)
+    os.makedirs(profile_path, exist_ok=True)
+    marker_path = os.path.join(profile_path, PROFILE_MARKER_NAME)
+    if not existed or profile_is_script_owned(profile_path):
+        with open(marker_path, "w", encoding="utf-8") as marker:
+            marker.write("sub2api auth profile\n")
+    else:
+        print(
+            style(
+                f"⚠️ [sub2api-auth] Reusing unmarked custom profile; it will never be deleted automatically: {profile_path}",
+                "33",
+            ),
+            file=sys.stderr,
+        )
+
+
 def runtime_evaluate(ws: WebSocketClient, expression: str, timeout: float = 30) -> object:
     result = ws.call(
         "Runtime.evaluate",
@@ -402,6 +500,7 @@ def wait_for_auth(ws: WebSocketClient, timeout_ms: int) -> dict:
   return {{
     href: location.href,
     pathname: location.pathname,
+    userAgent: navigator.userAgent,
     ready: Boolean(storage.auth_token && storage.auth_user),
     storage,
   }};
@@ -422,7 +521,6 @@ def wait_for_auth(ws: WebSocketClient, timeout_ms: int) -> dict:
 
 
 def launch_chrome(args: argparse.Namespace, port: int) -> subprocess.Popen:
-    os.makedirs(args.profile, exist_ok=True)
     cmd = [
         args.browser,
         f"--remote-debugging-port={port}",
@@ -435,7 +533,7 @@ def launch_chrome(args: argparse.Namespace, port: int) -> subprocess.Popen:
     return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def build_auth_state(url: str, storage: dict) -> dict:
+def build_auth_state(url: str, user_agent: str, storage: dict) -> dict:
     local_storage = {key: str(value) for key, value in storage.items() if value is not None}
     local_storage["auth_user"] = normalize_auth_user(local_storage.get("auth_user"))
     if not local_storage.get("token_expires_at"):
@@ -443,6 +541,7 @@ def build_auth_state(url: str, storage: dict) -> dict:
 
     return {
         "origin": f"{urllib.parse.urlparse(url).scheme}://{urllib.parse.urlparse(url).netloc}",
+        "userAgent": user_agent,
         "exported_at": utc_now_iso(),
         "localStorage": local_storage,
     }
@@ -456,7 +555,7 @@ def write_auth_state(out_path: str, payload: dict) -> str:
     return payload_json
 
 
-def print_summary(payload: dict, out_path: str, monitor_url: str) -> None:
+def print_summary(payload: dict, out_path: str) -> None:
     local_storage = payload.get("localStorage") if isinstance(payload, dict) else {}
     if not isinstance(local_storage, dict):
         local_storage = {}
@@ -467,7 +566,7 @@ def print_summary(payload: dict, out_path: str, monitor_url: str) -> None:
     print(style("✅ 登录态导出成功", "1", "32"))
     print(style("════════════════════════════════════════", "36"))
     print(style("🧩 Koishi 配置填写提示", "1", "35"))
-    print(style(f"   🔗 monitorUrl: {monitor_url}", "1", "36"))
+    print(style(f"   🔗 sub2apiBaseUrl: {payload.get('origin', '未知')}", "1", "36"))
     print(style("   🔐 authStateJson: 复制下方完整 JSON", "1", "36"))
     print()
     print(style("⏰ Token 过期信息", "1", "33"))
@@ -477,6 +576,7 @@ def print_summary(payload: dict, out_path: str, monitor_url: str) -> None:
     print()
     print(style("📦 导出信息", "1", "32"))
     print(style(f"   🌐 页面 Origin: {payload.get('origin', '未知')}", "32"))
+    print(style(f"   🏷️ 浏览器 UA: {payload.get('userAgent', '未知')}", "32"))
     print(style(f"   🕒 导出时间: {format_local_from_iso(payload.get('exported_at'))}", "32"))
     print(style(f"   💾 文件位置: {out_path}", "32"))
     print(style("════════════════════════════════════════", "36"))
@@ -496,10 +596,15 @@ def main() -> int:
     args.profile = os.path.abspath(args.profile)
     args.out = os.path.abspath(args.out)
     port = args.port or pick_port()
-    chrome = launch_chrome(args, port)
+    keep_open = args.profile_mode == "open"
+    profile_prepared = False
+    chrome: Optional[subprocess.Popen] = None
     ws: Optional[WebSocketClient] = None
 
     try:
+        prepare_profile(args.profile, args.profile_mode)
+        profile_prepared = True
+        chrome = launch_chrome(args, port)
         wait_for_devtools(port, 30_000)
         ws_url = find_page_ws(port, args.url)
         ws = WebSocketClient(ws_url)
@@ -516,34 +621,41 @@ def main() -> int:
         storage = state.get("storage") if isinstance(state, dict) else None
         if not isinstance(storage, dict):
             raise DevToolsError("🔐 Auth state payload did not contain localStorage")
+        user_agent = state.get("userAgent") if isinstance(state, dict) else None
+        if not isinstance(user_agent, str) or not user_agent.strip():
+            raise DevToolsError("🏷️ Auth state payload did not contain navigator.userAgent")
 
-        payload = build_auth_state(args.url, storage)
+        payload = build_auth_state(args.url, user_agent.strip(), storage)
         payload_json = write_auth_state(args.out, payload)
-        print_summary(payload, args.out, args.url)
+        print_summary(payload, args.out)
         print(style("📦 [sub2api-auth] JSON:", "1", "35"))
         print(payload_json)
 
-        if args.keep_open:
-            print(style("🪟 [sub2api-auth] --keep-open enabled; press Ctrl+C to exit when done.", "33"))
+        if keep_open:
+            print(style("🪟 [sub2api-auth] profile mode is open; press Ctrl+C to exit when done.", "33"))
             while True:
                 time.sleep(3600)
         return 0
     finally:
-        if ws and not args.keep_open:
+        if ws and not keep_open:
             try:
-                ws.call("Browser.close", timeout=2)
+                ws.call("Browser.close", timeout=5)
             except Exception:
                 pass
             ws.close()
-        if not args.keep_open and chrome.poll() is None:
+        if not keep_open and chrome:
             try:
-                chrome.terminate()
                 chrome.wait(timeout=5)
-            except Exception:
+            except subprocess.TimeoutExpired:
+                chrome.terminate()
                 try:
+                    chrome.wait(timeout=5)
+                except subprocess.TimeoutExpired:
                     chrome.kill()
-                except Exception:
-                    pass
+                    chrome.wait(timeout=5)
+        if args.profile_mode == "temporary" and profile_prepared:
+            clear_profile(args.profile)
+            print(style(f"🧹 [sub2api-auth] Removed temporary profile: {args.profile}", "36"))
 
 
 if __name__ == "__main__":

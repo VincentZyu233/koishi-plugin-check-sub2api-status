@@ -15,8 +15,10 @@ export interface Config {
   enableWaitingHint: boolean
 
   // ===== 🚇 中转站设置 =====
-  monitorUrl: string
+  sub2apiBaseUrl: string
   authStateJson: string
+  enableCustomUserAgent: boolean
+  customUserAgent: string
 
   // ===== 📸 截图设置 =====
   viewportWidth: number
@@ -48,7 +50,7 @@ export const Config: Schema<Config> = Schema.intersect([
       .default(false)
       .description('📈 是否启用 sub2api 最近使用趋势截图指令。'),
     trendCommandName: Schema.string()
-      .default('trend')
+      .default('sub2api-trend')
       .description('⌨️ sub2api 最近使用趋势截图指令名称。'),
   }).description('📋 指令设置'),
 
@@ -64,14 +66,20 @@ export const Config: Schema<Config> = Schema.intersect([
 
   // ===== 🚇 中转站设置 =====
   Schema.object({
-    monitorUrl: Schema.string()
+    sub2apiBaseUrl: Schema.string()
       .role('link')
-      .default('http://127.0.0.1:8080/monitor')
-      .description('🔗 sub2api 渠道状态页面地址'),
+      .default('http://127.0.0.1:8080')
+      .description('🔗 sub2api 服务根地址，不包含 /monitor 或 /admin/dashboard 页面路径。'),
     authStateJson: Schema.string()
       .role('textarea', { rows: [4, 10] })
       .default('')
-      .description('🔐 登录态 JSON。请用 tools/export-auth-state.py 或 .mjs 导出后，把控制台输出的 JSON 粘贴到这里。'),
+      .description('🔐 登录态 JSON，包含 Origin、User-Agent 和 localStorage。请用 `tools/export-auth-state.py` 或 `.mjs` 导出后，把完整 JSON 粘贴到这里。'),
+    enableCustomUserAgent: Schema.boolean()
+      .default(false)
+      .description('🧪 是否使用自定义 User-Agent 覆盖登录态 JSON 中导出的 User-Agent。'),
+    customUserAgent: Schema.string()
+      .default('')
+      .description('🏷️ 自定义 User-Agent，仅在启用自定义 User-Agent 时生效。'),
   }).description('🚇 中转站设置'),
 
   // ===== 📸 截图设置 =====

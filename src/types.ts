@@ -26,6 +26,7 @@ export interface CropRule {
 
 export interface AuthStateExport {
   origin?: string
+  userAgent?: unknown
   exported_at?: string
   localStorage?: Partial<Record<LocalStorageKey, unknown>>
   items?: Partial<Record<LocalStorageKey, unknown>>
@@ -37,3 +38,9 @@ export interface AuthStateExport {
 }
 
 export type AuthStorage = Record<LocalStorageKey, string>
+
+export interface AuthState {
+  origin: string
+  userAgent: string
+  storage: AuthStorage
+}
