@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url'
 
 import { build } from 'esbuild'
 
+import { formatError, logError, logSuccess } from '../shared/console-style.mjs'
+
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url))
-const PLUGIN_ROOT = path.resolve(TEST_DIR, '..')
+const PLUGIN_ROOT = path.resolve(TEST_DIR, '..', '..')
 const PUPPETEER_SOURCE = path.join(PLUGIN_ROOT, 'src', 'puppeteer.ts')
 
 /**
@@ -206,10 +208,10 @@ async function main() {
     'fallback-cleanup',
   ])
 
-  console.log('onboarding-tour: all checks passed')
+  logSuccess('onboarding-tour：全部检查通过')
 }
 
 main().catch((error) => {
-  console.error(error)
+  logError('onboarding-tour：检查失败', formatError(error))
   process.exitCode = 1
 })

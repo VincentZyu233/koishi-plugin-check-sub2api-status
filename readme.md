@@ -31,7 +31,7 @@ sub2api 前端登录态保存在 `localStorage`：
 
 截图页会根据 `auth_user` 提前标记 sub2api 官方新手引导为已完成，并在截图前再检查 driver.js 引导层。如果新版 sub2api 仍显示引导，插件会通过官方关闭按钮或 `Escape` 销毁遮罩，避免灰色引导层进入截图。
 
-Koishi 只从配置项 `authStateJson`、`enableCustomUserAgent` 和 `customUserAgent` 读取这些信息，不会读取或写回任何本地登录态文件。
+Koishi 只从配置项 `authStateJson`、`enableCustomUserAgent`、`customUserAgent` 以及可选的自动重新登录配置读取认证信息，不会读取或写回任何本地登录态文件。refresh 或重新登录签发的新 token 只保存在插件进程内，并在截图页面关闭前同步回来。
 
 ## 导出登录态
 
@@ -104,6 +104,9 @@ check-sub2api-status:
   sub2apiBaseUrl: http://127.0.0.1:8080
   enableCustomUserAgent: false
   customUserAgent: ''
+  enableAutoRelogin: false
+  loginEmail: ''
+  loginPassword: ''
   authStateJson: |
     {
       "origin": "http://127.0.0.1:8080",
@@ -117,6 +120,16 @@ check-sub2api-status:
       }
     }
 ```
+
+Koishi 控制台会按实际作用范围展示三组截图配置，配置键本身没有变化：
+
+| 配置分组 | 适用范围 | 配置项 |
+| --- | --- | --- |
+| 🌐 通用截图设置 | `sub2api-status` 与 `sub2api-trend` | `waitUntil`、`waitAfterLoadedMs`、`navigationTimeoutMs`、`deviceScaleFactor`、`imageType`、`imageQuality` |
+| 📡 状态页截图设置 | 仅 `sub2api-status` | `viewportWidth`、`viewportHeight`、`waitForSelector`、`fullPage`、`cropRules` |
+| 📈 趋势截图设置 | 仅 `sub2api-trend` | `trendScreenshotRange` |
+
+趋势截图固定使用 `2240 × 1200` 视口，并与状态页共用 `deviceScaleFactor` 缩放倍率。趋势页通过 DOM 区域计算截图边界，并等待所有 Chart.js Canvas 出现有效绘制像素且连续 750ms 保持稳定，避免截到空白帧、动画中间帧或响应式缩放中的折线图。趋势截图不会读取状态页的视口、完整页面或裁剪规则配置。`imageQuality` 仅在 JPEG 或 WebP 输出时生效，PNG 会忽略该配置。
 
 把导出脚本控制台打印的完整 JSON 粘到 `authStateJson` 即可。导出的 token 属于敏感信息，`tools/output` 默认会忽略 JSON 文件，不建议提交到仓库。
 
@@ -132,6 +145,48 @@ check-sub2api-status:
 `authStateJson.origin` 必须与 `sub2apiBaseUrl` 的 Origin 完全一致，包括协议、主机名和端口。如果不一致，插件会在发出任何 sub2api 请求前强制终止截图，避免会话 IP/UA 绑定因访问链路变化而撤销 refresh-token 家族。
 
 例如，使用 `--url "http://192.168.31.25:8080/monitor"` 导出时，`sub2apiBaseUrl` 也必须填写 `http://192.168.31.25:8080`，不能改用公网域名。Origin 一致只能保证访问地址一致；如果 sub2api 开启会话 IP/UA 绑定，导出脚本与 Koishi 还应使用相同的网络出口。
+
+### 自动刷新与重新登录
+
+`enableAutoRelogin` 默认关闭。关闭时插件仍会在进程内接收并复用 sub2api 前端轮换出的新 token，但 refresh token 已失效后会要求重新导出登录态。
+
+开启后，插件会采用以下顺序维护登录态：
+
+1. 首次截图时在 Puppeteer 页面内调用 sub2api 官方 `/api/v1/auth/refresh`，验证并轮换导出的 refresh token。
+2. access token 距离过期不足两分钟时，再次通过官方接口刷新并原子替换 access token、refresh token 与过期时间。
+3. 只有 refresh 返回确定性的 `401`、`403` 或 token 撤销错误后，才使用 `loginEmail` 与 `loginPassword` 调用 `/api/v1/auth/login`。
+4. 重新登录失败后固定冷却 60 秒，避免错误密码、限流或安全设置不兼容时连续请求登录接口。
+5. 页面意外返回认证错误时，单次截图最多重新建立登录态并重试一次，不会形成无限刷新或登录循环。
+
+`authStateJson` 仍然是必填的初始登录态，因为它提供必须校验的 Origin、稳定 User-Agent、用户信息和首次 token。账号密码是 refresh 失效后的兜底，不会替代 Origin 与 UA 安全检查。
+
+#### sub2api 必要配置
+
+| 检查项 | 自动重新登录要求 | 检查位置 |
+| --- | --- | --- |
+| 登录方式 | 必须是设置了可用本地密码的账号；只有 OAuth 身份而没有本地密码时无法使用 | 使用无痕窗口测试邮箱和密码能否直接登录 |
+| 管理员权限 | `sub2api-trend` 使用的账号必须为 `admin` 且状态为 `active` | sub2api 管理后台的用户管理 |
+| 账号 TOTP 2FA | 目标账号不能在登录时要求 6 位 TOTP；若返回 `requires_2fa`，插件会停止而不会绕过 | 个人资料 → 安全设置 → 双因素认证 |
+| 全局 TOTP | 可以开启，但目标账号自身必须未启用 TOTP | 管理员设置 → 安全 → 双因素认证 |
+| Cloudflare Turnstile | 必须关闭；Turnstile token 短时且一次性，不能作为无人值守配置保存 | 管理员设置 → 安全 → Cloudflare Turnstile |
+| Session Binding | 可以开启；登录、刷新和截图会在同一 Puppeteer 页面中完成，但 Koishi 的代理、出口 IP 与 UA 必须保持稳定 | 管理员设置 → 安全 → 会话 IP/UA 绑定 |
+| Origin | `authStateJson.origin` 与 `sub2apiBaseUrl` 必须完全一致 | Koishi 配置与导出 JSON |
+
+密码字段使用 Koishi 的 `secret` 输入角色，因此控制台会遮罩显示；这不是加密，直接填写的密码仍会以明文持久化到 `koishi.yml`。不要把包含真实密码的配置文件提交到 Git、发送到群聊或附在问题报告中。
+
+开启示例：
+
+```yaml
+check-sub2api-status:
+  sub2apiBaseUrl: https://sub2api.example.com
+  authStateJson: |-
+    { "origin": "https://sub2api.example.com", "userAgent": "...", "localStorage": { "auth_token": "...", "refresh_token": "...", "auth_user": "...", "token_expires_at": "..." } }
+  enableAutoRelogin: true
+  loginEmail: admin@example.com
+  loginPassword: 请在本机 Koishi 控制台填写
+```
+
+运行期间刷新或重新登录得到的新 token 只保存在内存中，不写入 `authStateJson`、`tools/output` 或其他本地文件。Koishi 重启后会重新验证配置中的初始 refresh token；若它已经被上次运行轮换失效，则使用账号密码创建新的独立会话。
 
 ## 指令
 
@@ -184,14 +239,17 @@ sub2api 的管理仪表盘接口只接受 `YYYY-MM-DD`，结束日期还会包�
 
 ## 开发测试
 
-`test/onboarding-tour.mjs` 保留了新手引导遮罩修复的回归测试。脚本会在内存中打包当前 `src/puppeteer.ts`，使用假 Puppeteer Page 验证引导完成键注入、官方关闭按钮以及失败兜底清理，不会启动浏览器、访问网络、读取真实登录态或生成临时构建文件。
+`test/regression/onboarding-tour.mjs` 保留了新手引导遮罩修复的回归测试。脚本会在内存中打包当前 `src/puppeteer.ts`，使用假 Puppeteer Page 验证引导完成键注入、官方关闭按钮以及失败兜底清理，不会启动浏览器、访问网络、读取真实登录态或生成临时构建文件。
 
-`test/trend-screenshot-range.mjs` 记录了 A、B、C 范围设计，验证三档配置映射、DOM 矩形联合、向外取整、默认完整截图，以及 `config.ts` 的 description emoji 约束。
+`test/regression/trend-screenshot-range.mjs` 记录了 A、B、C 范围设计，验证三档配置映射、DOM 矩形联合、向外取整、默认完整截图，以及 `config.ts` 的 description emoji 约束。
 
-`test/trend-time-range.mjs` 验证趋势指令的默认时间范围、所有中英文单位别名、自然日计算、大小写兼容和范围限制。
+`test/regression/trend-time-range.mjs` 验证趋势指令的默认时间范围、所有中英文单位别名、自然日计算、大小写兼容和范围限制。
+
+`test/regression/auth-auto-relogin.mjs` 验证 token 轮换、默认关闭、401 后密码回退、TOTP 拒绝、并发单次刷新、页面 token 回收和 Origin fail-closed 行为，不读取真实账号、密码或 token。
 
 ```powershell
 yarn test:onboarding
+yarn test:auth
 yarn test:trend-range
 yarn test:trend-time
 ```

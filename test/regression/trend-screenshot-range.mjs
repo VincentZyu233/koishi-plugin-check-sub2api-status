@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url'
 
 import { build } from 'esbuild'
 
+import { formatError, logError, logSuccess } from '../shared/console-style.mjs'
+
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url))
-const PLUGIN_ROOT = path.resolve(TEST_DIR, '..')
+const PLUGIN_ROOT = path.resolve(TEST_DIR, '..', '..')
 const PUPPETEER_SOURCE = path.join(PLUGIN_ROOT, 'src', 'puppeteer.ts')
 const CONFIG_SOURCE = path.join(PLUGIN_ROOT, 'src', 'config.ts')
 
@@ -126,7 +128,10 @@ function makeDashboardControlsPage(selectedIndex) {
 }
 
 async function assertConfigDescriptionsHaveEmoji() {
-  const source = await readFile(CONFIG_SOURCE, 'utf8')
+  const [source, puppeteerSource] = await Promise.all([
+    readFile(CONFIG_SOURCE, 'utf8'),
+    readFile(PUPPETEER_SOURCE, 'utf8'),
+  ])
   const descriptionLines = source
     .split(/\r?\n/u)
     .filter(line => line.includes('.description('))
@@ -140,6 +145,65 @@ async function assertConfigDescriptionsHaveEmoji() {
     source,
     /\.default\(TREND_SCREENSHOT_RANGES\.ALL\)/u,
     'A + B + C should remain the default screenshot range',
+  )
+
+  const screenshotGroups = [
+    '🌐 通用截图设置',
+    '📡 状态页截图设置',
+    '📈 趋势截图设置',
+  ]
+  const groupPositions = screenshotGroups.map((group) => {
+    const position = source.indexOf(`}).description('${group}')`)
+    assert.ok(position >= 0, `config.ts should contain the ${group} group`)
+    return position
+  })
+  assert.ok(
+    groupPositions[0] < groupPositions[1] && groupPositions[1] < groupPositions[2],
+    'screenshot config groups should remain common, status, then trend',
+  )
+
+  const schemaStart = source.indexOf('export const Config')
+  const commonGroupStart = source.indexOf('// ===== 🌐 通用截图设置 =====', schemaStart)
+  const statusGroupStart = source.indexOf('// ===== 📡 状态页截图设置 =====', commonGroupStart)
+  const trendGroupStart = source.indexOf('// ===== 📈 趋势截图设置 =====', statusGroupStart)
+  assert.match(
+    source.slice(commonGroupStart, statusGroupStart),
+    /deviceScaleFactor/u,
+    'deviceScaleFactor should remain in the common screenshot group',
+  )
+  assert.doesNotMatch(
+    source.slice(statusGroupStart, trendGroupStart),
+    /deviceScaleFactor/u,
+    'the status-only screenshot group should not own deviceScaleFactor',
+  )
+
+  const sharedScaleFactorUsages = puppeteerSource.match(
+    /deviceScaleFactor:\s*config\.deviceScaleFactor/gu,
+  ) || []
+  assert.equal(
+    sharedScaleFactorUsages.length,
+    2,
+    'status and trend screenshots should both use config.deviceScaleFactor',
+  )
+  assert.doesNotMatch(
+    puppeteerSource,
+    /TREND_DEVICE_SCALE_FACTOR/u,
+    'trend screenshots should not restore a hard-coded scale factor',
+  )
+  assert.match(
+    puppeteerSource,
+    /CANVAS_STABLE_DURATION_MS\s*=\s*750/u,
+    'trend screenshots should retain the 750ms canvas stability window',
+  )
+  assert.match(
+    puppeteerSource,
+    /paintedSamples\s*>=\s*CANVAS_MIN_PAINTED_SAMPLES/u,
+    'canvas readiness should require painted pixels instead of dimensions alone',
+  )
+  assert.match(
+    puppeteerSource,
+    /signature\s*===\s*previousSignature/u,
+    'canvas readiness should require an unchanged render signature',
   )
 }
 
@@ -210,10 +274,10 @@ async function main() {
   assert.deepEqual(hourControls.optionClicks, [1])
 
   await assertConfigDescriptionsHaveEmoji()
-  console.log('trend-screenshot-range: all checks passed')
+  logSuccess('trend-screenshot-range：全部检查通过')
 }
 
 main().catch((error) => {
-  console.error(error)
+  logError('trend-screenshot-range：检查失败', formatError(error))
   process.exitCode = 1
 })

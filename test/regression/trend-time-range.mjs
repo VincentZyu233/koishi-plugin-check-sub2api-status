@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url'
 
 import { build } from 'esbuild'
 
+import { formatError, logError, logSuccess } from '../shared/console-style.mjs'
+
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url))
-const PLUGIN_ROOT = path.resolve(TEST_DIR, '..')
+const PLUGIN_ROOT = path.resolve(TEST_DIR, '..', '..')
 const RANGE_SOURCE = path.join(PLUGIN_ROOT, 'src', 'utils.ts')
 
 /**
@@ -101,10 +103,10 @@ async function main() {
   assert.throws(() => resolveTrendTimeRange(366, 'd', now), /不能超过 365/u)
   assert.throws(() => resolveTrendTimeRange(1, 'week', now), /不支持的时间单位/u)
 
-  console.log('trend-time-range: all checks passed')
+  logSuccess('trend-time-range：全部检查通过')
 }
 
 main().catch((error) => {
-  console.error(error)
+  logError('trend-time-range：检查失败', formatError(error))
   process.exitCode = 1
 })

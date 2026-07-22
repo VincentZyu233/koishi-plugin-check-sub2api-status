@@ -2,19 +2,25 @@ import type { Context } from 'koishi'
 import {} from 'koishi-plugin-puppeteer'
 import type { Page } from 'puppeteer-core'
 
-import { readAuthState } from './auth'
+import {
+  markRuntimeAuthStateStale,
+  prepareRuntimeAuthState,
+  syncRuntimeAuthStateFromPage,
+} from './auth'
 import type { Config } from './config'
 import { CROP_DIRECTIONS, TREND_SCREENSHOT_RANGES } from './types'
-import type { AuthState, AuthStorage, TrendScreenshotRange } from './types'
+import type { AuthStorage, TrendScreenshotRange } from './types'
 import { resolveTrendTimeRange, sleep } from './utils'
 import type { TrendTimeRange } from './utils'
 
 const TREND_VIEWPORT_WIDTH = 2240
 const TREND_VIEWPORT_HEIGHT = 1200
-const TREND_DEVICE_SCALE_FACTOR = 1
 const USERS_TREND_PATH = '/admin/dashboard/users-trend'
 const DASHBOARD_SNAPSHOT_PATH = '/admin/dashboard/snapshot-v2'
 const ONBOARDING_STORAGE_VERSION = 'v4_interactive'
+const CANVAS_STABLE_DURATION_MS = 750
+const CANVAS_POLL_INTERVAL_MS = 150
+const CANVAS_MIN_PAINTED_SAMPLES = 8
 
 export type TrendScreenshotRegion = 'filter' | 'charts' | 'recent'
 
@@ -75,30 +81,110 @@ export function mergeTrendScreenshotRects(
   }
 }
 
-async function waitForRenderableCanvases(
+interface CanvasRenderProbe {
+  width: number
+  height: number
+  clientWidth: number
+  clientHeight: number
+  paintedSamples: number
+  hash: number
+}
+
+async function readCanvasRenderProbes(
+  page: Page,
+  selector: string,
+  minimumCount: number,
+): Promise<CanvasRenderProbe[] | null> {
+  return page.$eval(selector, (element, requiredCount) => {
+    const canvases = Array.from(element.querySelectorAll('canvas'))
+    if (canvases.length < requiredCount) return null
+
+    return canvases.map((canvas) => {
+      const width = canvas.width
+      const height = canvas.height
+      const clientWidth = canvas.clientWidth
+      const clientHeight = canvas.clientHeight
+      if (width <= 0 || height <= 0 || clientWidth <= 0 || clientHeight <= 0) {
+        return { width, height, clientWidth, clientHeight, paintedSamples: 0, hash: 0 }
+      }
+
+      // Downsample before reading pixels so high deviceScaleFactor values do not
+      // force a full multi-megapixel GPU readback on every stability poll.
+      const probe = document.createElement('canvas')
+      probe.width = 64
+      probe.height = 32
+      const context = probe.getContext('2d', { willReadFrequently: true })
+      if (!context) {
+        return { width, height, clientWidth, clientHeight, paintedSamples: 0, hash: 0 }
+      }
+      context.drawImage(canvas, 0, 0, probe.width, probe.height)
+      const pixels = context.getImageData(0, 0, probe.width, probe.height).data
+      let paintedSamples = 0
+      let hash = 2166136261
+      for (let index = 0; index < pixels.length; index += 4) {
+        const alpha = pixels[index + 3]
+        if (alpha > 0) paintedSamples += 1
+        hash ^= pixels[index]
+        hash = Math.imul(hash, 16777619)
+        hash ^= pixels[index + 1]
+        hash = Math.imul(hash, 16777619)
+        hash ^= pixels[index + 2]
+        hash = Math.imul(hash, 16777619)
+        hash ^= alpha
+        hash = Math.imul(hash, 16777619)
+      }
+
+      return {
+        width,
+        height,
+        clientWidth,
+        clientHeight,
+        paintedSamples,
+        hash: hash >>> 0,
+      }
+    })
+  }, minimumCount).catch(() => null)
+}
+
+async function waitForStableCanvases(
   page: Page,
   selector: string,
   minimumCount: number,
   timeoutMs: number,
 ): Promise<boolean> {
-  return page.waitForFunction(({
-    selector,
-    minimumCount,
-  }: {
-    selector: string
-    minimumCount: number
-  }) => {
-    const element = document.querySelector(selector)
-    if (!element) return false
+  await page.evaluate(async () => {
+    await document.fonts?.ready
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  }).catch(() => undefined)
 
-    const renderableCount = Array.from(element.querySelectorAll('canvas'))
-      .filter(canvas => canvas.width > 0 && canvas.height > 0)
-      .length
-    return renderableCount >= minimumCount
-  }, { timeout: timeoutMs }, { selector, minimumCount }).then(async (handle) => {
-    await handle.dispose()
-    return true
-  }).catch(() => false)
+  const deadline = Date.now() + timeoutMs
+  let previousSignature = ''
+  let stableSince = 0
+
+  while (Date.now() < deadline) {
+    const probes = await readCanvasRenderProbes(page, selector, minimumCount)
+    const ready = probes !== null
+      && probes.length >= minimumCount
+      && probes.every(probe => probe.paintedSamples >= CANVAS_MIN_PAINTED_SAMPLES)
+
+    if (ready) {
+      const signature = JSON.stringify(probes)
+      if (signature === previousSignature) {
+        if (Date.now() - stableSince >= CANVAS_STABLE_DURATION_MS) return true
+      } else {
+        previousSignature = signature
+        stableSince = Date.now()
+      }
+    } else {
+      previousSignature = ''
+      stableSince = 0
+    }
+
+    await sleep(Math.min(CANVAS_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())))
+  }
+
+  return false
 }
 
 async function waitForTrendApiResponses(
@@ -239,43 +325,6 @@ function getSub2apiPageUrl(baseUrl: string, pathname: string): string {
   return url.toString()
 }
 
-function parseOrigin(value: string, fieldName: string): string {
-  try {
-    return new URL(value.trim()).origin
-  } catch {
-    throw new Error(`🌐 ${fieldName} 不是有效 URL：${value}`)
-  }
-}
-
-function validateAuthOrigin(authState: AuthState, baseUrl: string): void {
-  const authOrigin = parseOrigin(authState.origin, 'authStateJson.origin')
-  const configuredOrigin = parseOrigin(baseUrl, 'sub2apiBaseUrl')
-  if (authOrigin !== configuredOrigin) {
-    throw new Error(`🛡️ 登录态 Origin 与 sub2apiBaseUrl 不一致：${authOrigin} ≠ ${configuredOrigin}。已阻止请求，请使用相同地址重新导出登录态。`)
-  }
-}
-
-function resolveUserAgent(config: Config, authState: AuthState): string {
-  const sourceName = config.enableCustomUserAgent
-    ? 'customUserAgent'
-    : 'authStateJson.userAgent'
-  const candidate = config.enableCustomUserAgent
-    ? config.customUserAgent
-    : authState.userAgent
-  const userAgent = typeof candidate === 'string' ? candidate.trim() : ''
-
-  if (!userAgent) {
-    if (config.enableCustomUserAgent) {
-      throw new Error('🏷️ 已启用自定义 User-Agent，但 customUserAgent 为空。')
-    }
-    throw new Error('🏷️ authStateJson 缺少 userAgent。请用最新脚本重新导出，或启用自定义 User-Agent。')
-  }
-  if (/[\r\n]/.test(userAgent)) {
-    throw new Error(`🏷️ ${sourceName} 不能包含换行符。`)
-  }
-  return userAgent
-}
-
 function getCropMargins(config: Config) {
   const margins = {
     top: 0,
@@ -395,13 +444,16 @@ async function prepareAuthenticatedPage(
   config: Config,
   forceDarkTheme = false,
 ): Promise<void> {
-  const authState = await readAuthState(config)
-  validateAuthOrigin(authState, config.sub2apiBaseUrl)
-  await page.setUserAgent(resolveUserAgent(config, authState))
+  const authState = await prepareRuntimeAuthState(page, config)
   await injectAuthStorage(page, authState.storage, forceDarkTheme)
 }
 
-export async function captureStatusScreenshot(ctx: Context, config: Config): Promise<Buffer> {
+function isRetryableAuthCaptureError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /(?:sub2api 返回 40[13]|登录态已经失效|页面跳到了 \/login|refresh_token 已被轮换)/u.test(message)
+}
+
+async function captureStatusScreenshotOnce(ctx: Context, config: Config): Promise<Buffer> {
   const page = await ctx.puppeteer.page()
 
   try {
@@ -485,11 +537,22 @@ export async function captureStatusScreenshot(ctx: Context, config: Config): Pro
 
     return toImageBuffer(await page.screenshot(screenshotOptions))
   } finally {
+    await syncRuntimeAuthStateFromPage(page, config).catch(() => undefined)
     await page.close().catch(() => undefined)
   }
 }
 
-export async function captureTrendScreenshot(
+export async function captureStatusScreenshot(ctx: Context, config: Config): Promise<Buffer> {
+  try {
+    return await captureStatusScreenshotOnce(ctx, config)
+  } catch (error) {
+    if (!config.enableAutoRelogin || !isRetryableAuthCaptureError(error)) throw error
+    markRuntimeAuthStateStale(config)
+    return captureStatusScreenshotOnce(ctx, config)
+  }
+}
+
+async function captureTrendScreenshotOnce(
   ctx: Context,
   config: Config,
   num?: number,
@@ -505,7 +568,7 @@ export async function captureTrendScreenshot(
     await page.setViewport({
       width: TREND_VIEWPORT_WIDTH,
       height: TREND_VIEWPORT_HEIGHT,
-      deviceScaleFactor: TREND_DEVICE_SCALE_FACTOR,
+      deviceScaleFactor: config.deviceScaleFactor,
     })
     await prepareAuthenticatedPage(page, config, true)
 
@@ -559,7 +622,7 @@ export async function captureTrendScreenshot(
       throw new Error('🎯 找不到最近使用趋势图表组件。')
     }
     const canvasWaitTimeoutMs = Math.min(config.navigationTimeoutMs, 10000)
-    const hasRenderableCanvas = await waitForRenderableCanvases(
+    const hasRenderableCanvas = await waitForStableCanvases(
       page,
       TREND_REGION_SELECTORS.recent,
       1,
@@ -574,7 +637,7 @@ export async function captureTrendScreenshot(
       if (!charts) {
         throw new Error('🎯 找不到模型分布与 Token 使用趋势区域。')
       }
-      const hasRenderableCharts = await waitForRenderableCanvases(
+      const hasRenderableCharts = await waitForStableCanvases(
         page,
         TREND_REGION_SELECTORS.charts,
         2,
@@ -624,6 +687,22 @@ export async function captureTrendScreenshot(
 
     return toImageBuffer(await page.screenshot(screenshotOptions))
   } finally {
+    await syncRuntimeAuthStateFromPage(page, config).catch(() => undefined)
     await page.close().catch(() => undefined)
+  }
+}
+
+export async function captureTrendScreenshot(
+  ctx: Context,
+  config: Config,
+  num?: number,
+  unit?: string,
+): Promise<Buffer> {
+  try {
+    return await captureTrendScreenshotOnce(ctx, config, num, unit)
+  } catch (error) {
+    if (!config.enableAutoRelogin || !isRetryableAuthCaptureError(error)) throw error
+    markRuntimeAuthStateStale(config)
+    return captureTrendScreenshotOnce(ctx, config, num, unit)
   }
 }

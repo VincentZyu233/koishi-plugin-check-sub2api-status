@@ -8,7 +8,127 @@
 
 ## 🚧🖼️ 未发布
 
-### 📸✨ 新增
+- 📈🎨 趋势截图不再仅凭 Canvas 宽高判断渲染完成。
+- 🧪🖼️ 新增缩略像素采样，要求每个目标 Canvas 已存在真实绘制像素。
+- ⏳📊 新增 750ms 连续像素签名稳定窗口，避开空白帧、动画中间帧与响应式 resize。
+- 🔎🌐 `deviceScaleFactor` 移入通用截图设置，并同时作用于状态页与趋势页。
+- 🧪🌐 实拍 CLI 的 `--device-scale-factor` 同步改为两类截图共用参数。
+- 🗂️🧪 测试脚本整理为 `test/regression/` 与 `test/live/` 两类目录。
+- 📚🧭 新增 `test/README.md`，逐项说明离线回归、真实实拍、CLI 覆盖与安全约束。
+- 🎨🖥️ 测试输出统一增加加粗 emoji 与 ANSI 状态颜色，并支持 `NO_COLOR=1` 关闭颜色。
+- 📂🔗 每轮实拍的开始与成功日志输出纯文本绝对图片路径，便于 VS Code 终端点击跳转。
+- ✅📸 真实环境完成 DPR 3.3 与 DPR 1 各 5 轮趋势截图验证，两组均为 5/5 成功。
+
+---
+
+## 🔄🔐 0.1.6-alpha.8+20260723 - 2026-07-23
+
+### 🧾🔖 版本信息
+
+- ⬆️📦 版本：`0.1.5-alpha.7+20260722` → `0.1.6-alpha.8+20260723`。
+- 🔄🔐 新增 sub2api token 进程内轮换与可选密码重新登录能力。
+- 🛡️🔒 自动重新登录默认关闭，升级后不会主动使用账号密码。
+
+### 🎛️🔑 新增配置
+
+- 🔄🔐 新增 `enableAutoRelogin`，默认值为 `false`。
+- 📧🔐 新增 `loginEmail`，用于配置 sub2api 本地管理员登录邮箱。
+- 🔑🛡️ 新增 `loginPassword`，使用 Koishi `secret` 输入角色遮罩显示。
+- ⚠️📄 README 明确说明 `secret` 只负责界面遮罩，不加密 `koishi.yml`。
+- 😀📝 三个新增配置的 description 均包含 1–2 个 emoji。
+
+### ♻️🧠 运行时登录态
+
+- 🔁🔐 access token 距离过期不足两分钟时主动调用官方 refresh API。
+- 🔄🗝️ refresh 成功后原子替换 access token、refresh token 与过期时间。
+- 🧠🚫 轮换后的 token 只保存在插件进程内，不回写 Koishi 配置或本地文件。
+- 📥🔄 页面自身发生 token 轮换时，在关闭 Puppeteer 页面前回收最新 localStorage。
+- 🔒🧵 同一插件配置的并发截图共享认证互斥锁，只允许一次 token 轮换。
+- 🔁🛡️ 页面意外返回认证错误时，单次截图最多恢复登录态并重试一次。
+
+### 🔐🚪 密码回退
+
+- 🚫🔑 refresh 成功时不会读取或发送配置的登录密码。
+- 4️⃣0️⃣1️⃣ 仅在 refresh 确定返回认证失效后调用 `/api/v1/auth/login`。
+- 🌐🏷️ 登录、刷新和截图均复用 Puppeteer 页面、Origin、User-Agent 与网络出口。
+- 🧷🌍 保持与 sub2api Session Binding 的 IP/UA 指纹要求兼容。
+- ⏳🛑 密码登录失败后固定冷却 60 秒，避免持续触发登录限流。
+- 🔢⛔ 登录返回 TOTP 2FA 挑战时明确停止，不保存密钥或绕过二次验证。
+- 🧩⛔ Cloudflare Turnstile 启用时不尝试生成或绕过人机验证 token。
+
+### 📚🛡️ 使用文档
+
+- 📋✅ README 新增 sub2api 自动登录必要配置检查表。
+- 👤✅ 说明本地密码、管理员权限、账号状态与 TOTP 要求。
+- ☁️✅ 说明 Turnstile 必须关闭。
+- 🧷✅ 说明 Session Binding 可以开启，但代理、出口 IP 与 UA 必须稳定。
+- 🌐✅ 继续要求 `authStateJson.origin` 与 `sub2apiBaseUrl` 完全一致。
+- 🔐✅ 说明 `authStateJson` 仍是提供 Origin、UA 与初始 token 的必填种子配置。
+
+### 📦🔒 发布安全
+
+- 📋🔐 将 npm 发布白名单从整个 `tools` 目录收紧到两个导出脚本。
+- 🚫🗃️ 阻止 `tools/output` 中的真实登录态 JSON 进入 npm tarball。
+- 🚫🧪 阻止 `tools/tmp` 中的开发验证产物进入 npm tarball。
+- 🛡️📦 弥补 `.gitignore` 不会自动影响 `npm pack` 的安全缺口。
+
+### 🧪✅ 验证
+
+- 🔄✅ 新增 `test/regression/auth-auto-relogin.mjs` 验证 refresh token 轮换。
+- 🚫✅ 验证自动重新登录默认关闭。
+- 🔑✅ 验证 refresh 401 后使用密码登录并更新用户状态。
+- 🔢✅ 验证 TOTP 挑战会被明确拒绝。
+- 🧵✅ 验证两个并发截图只执行一次 refresh。
+- 📥✅ 验证页面轮换后的 token 会同步回运行时会话。
+- 🛡️✅ 验证 Origin 不一致时在任何导航前终止。
+
+---
+
+## 🎛️📸 0.1.5-alpha.7+20260722 - 2026-07-22
+
+### 🧾🔖 版本信息
+
+- ⬆️📦 版本：`0.1.4-alpha.6+20260722` → `0.1.5-alpha.7+20260722`。
+- 🧩✅ 配置键、默认值和截图运行逻辑保持兼容。
+- 🎛️✨ 本版本主要改善 Koishi 控制台配置项的职责划分与可读性。
+
+### 🎛️🧭 配置分组
+
+- 🌐📸 将两条指令共用的配置移动到“通用截图设置”。
+- 📡📸 将只影响 `sub2api-status` 的配置移动到“状态页截图设置”。
+- 📈📸 将 `trendScreenshotRange` 移动到“趋势截图设置”。
+- 🧹📋 从“指令设置”中移除不属于指令注册行为的截图范围配置。
+- 🌐⏳ 通用分组包含 `waitUntil`、`waitAfterLoadedMs` 与 `navigationTimeoutMs`。
+- 🌐🖼️ 通用分组包含 `imageType` 与 `imageQuality`。
+- 📡↔️ 状态页分组包含 `viewportWidth` 与 `viewportHeight`。
+- 📡🔎 状态页分组包含 `deviceScaleFactor`。
+- 📡🎯 状态页分组包含 `waitForSelector`。
+- 📡🧾 状态页分组包含 `fullPage` 与 `cropRules`。
+- 📈📐 趋势分组包含 `trendScreenshotRange`。
+- 📈🖥️ 趋势配置说明明确标注固定 `2240 × 1200 × 1` 视口策略。
+- 😀📝 所有调整后的 Schema description 均保留 1–2 个 emoji。
+
+### 📚🖼️ 文档与预览
+
+- 🖼️📡 新增渠道状态效果预览图 `docs/images/preview/preview.status.png`。
+- 🖼️📈 新增管理仪表盘趋势效果预览图 `docs/images/preview/preview.trend.png`。
+- 📚👀 README 开头新增“效果预览”章节。
+- 📡🧾 README 展示 `sub2api-status` 的真实渠道状态输出。
+- 📈🧩 README 展示 `sub2api-trend` 默认 `A+B+C` 趋势输出。
+- 🗂️📋 README 新增三个截图配置分组的适用范围表格。
+- ⚠️🖼️ README 说明 `imageQuality` 仅影响 JPEG 与 WebP。
+- 📐🛡️ README 说明趋势截图不会读取状态页视口、完整页面与裁剪规则。
+
+### 🧪✅ 验证
+
+- 🧩✅ 回归测试锁定通用、状态页、趋势三个分组名称。
+- 🔢✅ 回归测试锁定三个截图分组的展示顺序。
+- 😀✅ 回归测试继续检查全部 description 的 emoji。
+- 🧰✅ 通过 TypeScript 类型检查。
+- 📦✅ 通过 esbuild 入口打包检查。
+- 🧹✅ 通过 `git diff --check` 检查。
+
+### 📸✨ 本版本收录的预览资源
 
 - 🖼️📡 新增渠道状态效果预览图 `docs/images/preview/preview.status.png`。
 - 🖼️📈 新增管理仪表盘趋势效果预览图 `docs/images/preview/preview.trend.png`。
@@ -109,14 +229,14 @@
 
 ### 🧪✅ 测试与验证
 
-- 🧪🧩 新增 `test/trend-screenshot-range.mjs`。
+- 🧪🧩 新增 `test/regression/trend-screenshot-range.mjs`。
 - 📐✅ 验证 A+B+C、B+C 与 C 三档范围映射。
 - 🧮✅ 验证多个 DOM 矩形的联合边界计算。
 - 🔲✅ 验证小数坐标向外取整行为。
 - 🎛️✅ 验证 day 已选中时下拉框会被正确关闭。
 - 🕐✅ 验证从 day 切换到 hour 时选择第二个官方选项。
 - 😀✅ 验证 `src/config.ts` 中全部 description 都包含 emoji。
-- 🧪⏱️ 新增 `test/trend-time-range.mjs`。
+- 🧪⏱️ 新增 `test/regression/trend-time-range.mjs`。
 - 🌟✅ 验证默认 `24 hour` 的日期计算。
 - 🔤✅ 验证全部中英文单位别名。
 - 🔡✅ 验证英文单位大小写兼容。
@@ -208,7 +328,7 @@
 - ⌨️🚪 官方关闭失败时尝试按下 Escape。
 - 🧹🛡️ 最后使用一次性 DOM 清理移除残留遮罩。
 - 🌫️🚫 避免灰色遮罩与欢迎卡片进入最终截图。
-- 🧪🧭 新增 `test/onboarding-tour.mjs` 回归测试。
+- 🧪🧭 新增 `test/regression/onboarding-tour.mjs` 回归测试。
 - 🧠📦 测试通过 esbuild 在内存中打包当前 TypeScript 源码。
 - 🌐🚫 测试不访问网络、不读取真实 Token、不启动浏览器。
 
@@ -380,11 +500,13 @@
 - 📈🌙 `0.1.0-alpha.2+20260722`：新增管理仪表盘最近使用趋势截图。
 - 🛡️🔐 `0.1.2-alpha.4+20260722`：加固 Origin、UA、Profile 生命周期与新手引导兼容性。
 - 🧩⏱️ `0.1.4-alpha.6+20260722`：新增三档截图范围、时间参数与官方控件联动。
-- 🖼️📚 `Unreleased`：加入状态与趋势真实效果预览图。
+- 🎛️📸 `0.1.5-alpha.7+20260722`：重组截图配置分组并加入真实效果预览图。
+- 🔄🔐 `0.1.6-alpha.8+20260723`：新增进程内 token 轮换与可选密码重新登录。
 
 ## 🧪🧭 当前测试矩阵
 
 - 🧭✅ `yarn test:onboarding`：验证新手引导预处理、官方关闭与失败兜底清理。
+- 🔄✅ `yarn test:auth`：验证 token 轮换、密码回退、并发互斥、TOTP 拒绝与 Origin 安全校验。
 - 🧩✅ `yarn test:trend-range`：验证截图区域、边界计算、emoji 描述与官方控件交互。
 - ⏱️✅ `yarn test:trend-time`：验证时间默认值、单位别名、日期计算与范围限制。
 - 🧰✅ TypeScript：验证配置、指令、Puppeteer 与工具类型契约。
@@ -396,6 +518,7 @@
 - 🔑🚫 不要把 `auth_token` 提交到 Git 仓库。
 - 🔄🚫 不要把 `refresh_token` 提交到 Git 仓库。
 - 👤🚫 不要把真实 `auth_user` 信息写入 issue、日志或截图说明。
+- 🔑🚫 不要把 `loginPassword`、真实邮箱或包含密码的 `koishi.yml` 提交到仓库。
 - 📁🙈 `tools/output` 中的登录态 JSON 仅用于人工复制与本地备份。
 - 🌐🛡️ `authStateJson.origin` 必须与 `sub2apiBaseUrl` 的 Origin 完全一致。
 - 🏷️🛡️ 开启会话绑定时，导出 UA 与截图 UA 应保持一致。
