@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-check-sub2api-status",
   "description": "📡📊🖼️ 检查你的 sub2api 中转站状态与管理仪表盘捏",
-  "version": "0.1.7-alpha.9+20260723",
+  "version": "0.1.8-alpha.10+20260723",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -13,6 +13,7 @@
   "scripts": {
     "test:onboarding": "node test/regression/onboarding-tour.mjs",
     "test:auth": "node test/regression/auth-auto-relogin.mjs",
+    "test:diagnostics": "node test/regression/diagnostics.mjs",
     "test:trend-range": "node test/regression/trend-screenshot-range.mjs",
     "test:trend-time": "node test/regression/trend-time-range.mjs",
     "test:live-status": "node test/live/run-live-screenshot.mjs status",

@@ -55,7 +55,8 @@ const BOOLEAN_OPTIONS = new Set([
   'full-page',
   'headless',
   'help',
-  'verbose-log',
+  'verbose-console-log',
+  'verbose-file-log',
 ])
 const COMMON_CONFIG_OPTIONS: Record<string, keyof Config> = {
   'sub2api-base-url': 'sub2apiBaseUrl',
@@ -68,7 +69,9 @@ const COMMON_CONFIG_OPTIONS: Record<string, keyof Config> = {
   'device-scale-factor': 'deviceScaleFactor',
   'image-type': 'imageType',
   'image-quality': 'imageQuality',
-  'verbose-log': 'verboseLog',
+  'verbose-console-log': 'verboseConsoleLog',
+  'verbose-file-log': 'verboseFileLog',
+  'verbose-file-log-retention': 'verboseFileLogRetention',
 }
 const STATUS_CONFIG_OPTIONS: Record<string, keyof Config> = {
   'viewport-width': 'viewportWidth',
@@ -177,7 +180,8 @@ function assignConfigOverride(
   if (configKey === 'enableAutoRelogin'
     || configKey === 'enableCustomUserAgent'
     || configKey === 'fullPage'
-    || configKey === 'verboseLog') {
+    || configKey === 'verboseConsoleLog'
+    || configKey === 'verboseFileLog') {
     Object.assign(overrides, { [configKey]: parseBoolean(value, optionName) })
     return
   }
@@ -188,6 +192,10 @@ function assignConfigOverride(
     || configKey === 'viewportHeight'
     || configKey === 'deviceScaleFactor') {
     Object.assign(overrides, { [configKey]: parseFiniteNumber(value, optionName) })
+    return
+  }
+  if (configKey === 'verboseFileLogRetention') {
+    overrides.verboseFileLogRetention = parsePositiveInteger(value, optionName)
     return
   }
   if (configKey === 'cropRules') {
@@ -390,7 +398,9 @@ function printHelp(kind: ScreenshotKind): void {
     '  --enable-auto-relogin <bool>       覆盖开关；账号密码仍只从 Koishi 配置读取',
     '  --enable-custom-user-agent <bool>  覆盖 enableCustomUserAgent',
     '  --custom-user-agent <text>         覆盖 customUserAgent',
-    '  --verbose-log <bool>               覆盖 verboseLog',
+    '  --verbose-console-log <bool>       覆盖 verboseConsoleLog',
+    '  --verbose-file-log <bool>          覆盖 verboseFileLog',
+    '  --verbose-file-log-retention <int> 覆盖 verboseFileLogRetention',
     '',
     `${kind === 'status' ? '状态页' : '趋势页'}覆盖：`,
     ...specific,
@@ -432,6 +442,7 @@ export async function runLiveScreenshotBatch(
 
   const browser = await launchBrowser(loaded.puppeteerConfig, cli)
   const ctx = {
+    baseDir: path.dirname(cli.configPath),
     puppeteer: {
       page: () => browser.newPage(),
     },

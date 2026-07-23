@@ -3,6 +3,12 @@ import { Schema } from 'koishi'
 import { CROP_DIRECTIONS, TREND_SCREENSHOT_RANGES } from './types'
 import type { CropRule, ImageType, TrendScreenshotRange, WaitUntil } from './types'
 
+export const VERBOSE_FILE_LOG_PATH_RELATIVE_TO_BASE_DIR = [
+  'cache',
+  'check-sub2api-status',
+  'diagnostics',
+] as const
+
 export interface Config {
   // ===== 📋 指令设置 =====
   enableStatusCommand: boolean
@@ -42,7 +48,10 @@ export interface Config {
   trendScreenshotRange: TrendScreenshotRange
 
   // ===== 🐛 调试设置 =====
-  verboseLog: boolean
+  verboseConsoleLog: boolean
+  verboseFileLog: boolean
+  verboseFileLogRetention: number
+  verboseFileLogPathRelativeToBaseDir: string[]
 }
 
 export const Config: Schema<Config> = Schema.intersect([
@@ -205,8 +214,23 @@ export const Config: Schema<Config> = Schema.intersect([
 
   // ===== 🐛 调试设置 =====
   Schema.object({
-    verboseLog: Schema.boolean()
+    verboseConsoleLog: Schema.boolean()
       .default(false)
-      .description('🐛 输出更详细的插件日志'),
+      .description('🖥️🐛 在 Koishi 控制台输出认证、导航、接口、Canvas 与截图阶段的详细诊断日志。'),
+    verboseFileLog: Schema.boolean()
+      .default(false)
+      .description('📁🧪 保存最新成功、最新失败及滚动历史诊断 JSON 与页面截图；图片可能包含仪表盘业务内容。'),
+    verboseFileLogRetention: Schema.number()
+      .role('slider')
+      .min(1)
+      .max(100)
+      .step(1)
+      .default(10)
+      .description('🗂️🔢 每种截图、每种结果分别保留的历史诊断数量，仅在文件日志开启时生效。'),
+    verboseFileLogPathRelativeToBaseDir: Schema.array(Schema.string())
+      .role('table')
+      .default([...VERBOSE_FILE_LOG_PATH_RELATIVE_TO_BASE_DIR])
+      .disabled()
+      .description('📁🧭 文件诊断日志路径片段；相对于 Koishi 根目录 ctx.baseDir，目前仅供查看。'),
   }).description('🐛 调试设置'),
 ]) as unknown as Schema<Config>

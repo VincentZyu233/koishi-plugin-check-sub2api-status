@@ -8,6 +8,10 @@ import {
   syncRuntimeAuthStateFromPage,
 } from './auth'
 import type { Config } from './config'
+import {
+  createCaptureDiagnostics,
+  type CaptureDiagnostics,
+} from './diagnostics'
 import { CROP_DIRECTIONS, TREND_SCREENSHOT_RANGES } from './types'
 import type { AuthStorage, TrendScreenshotRange } from './types'
 import { resolveTrendTimeRange, sleep } from './utils'
@@ -90,6 +94,13 @@ interface CanvasRenderProbe {
   hash: number
 }
 
+interface CanvasWaitResult {
+  stable: boolean
+  polls: number
+  durationMs: number
+  probes: CanvasRenderProbe[] | null
+}
+
 async function readCanvasRenderProbes(
   page: Page,
   selector: string,
@@ -151,7 +162,8 @@ async function waitForStableCanvases(
   selector: string,
   minimumCount: number,
   timeoutMs: number,
-): Promise<boolean> {
+): Promise<CanvasWaitResult> {
+  const startedAt = Date.now()
   await page.evaluate(async () => {
     await document.fonts?.ready
     await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
@@ -161,9 +173,13 @@ async function waitForStableCanvases(
   const deadline = Date.now() + timeoutMs
   let previousSignature = ''
   let stableSince = 0
+  let polls = 0
+  let lastProbes: CanvasRenderProbe[] | null = null
 
   while (Date.now() < deadline) {
     const probes = await readCanvasRenderProbes(page, selector, minimumCount)
+    polls += 1
+    lastProbes = probes
     const ready = probes !== null
       && probes.length >= minimumCount
       && probes.every(probe => probe.paintedSamples >= CANVAS_MIN_PAINTED_SAMPLES)
@@ -171,7 +187,14 @@ async function waitForStableCanvases(
     if (ready) {
       const signature = JSON.stringify(probes)
       if (signature === previousSignature) {
-        if (Date.now() - stableSince >= CANVAS_STABLE_DURATION_MS) return true
+        if (Date.now() - stableSince >= CANVAS_STABLE_DURATION_MS) {
+          return {
+            stable: true,
+            polls,
+            durationMs: Date.now() - startedAt,
+            probes,
+          }
+        }
       } else {
         previousSignature = signature
         stableSince = Date.now()
@@ -184,7 +207,12 @@ async function waitForStableCanvases(
     await sleep(Math.min(CANVAS_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())))
   }
 
-  return false
+  return {
+    stable: false,
+    polls,
+    durationMs: Date.now() - startedAt,
+    probes: lastProbes,
+  }
 }
 
 async function waitForTrendApiResponses(
@@ -193,7 +221,10 @@ async function waitForTrendApiResponses(
   includesCharts: boolean,
   expectedRange: TrendTimeRange | undefined,
   trigger: () => Promise<unknown>,
+  diagnostics: CaptureDiagnostics,
+  phase: 'initial' | 'range',
 ): Promise<void> {
+  const startedAt = Date.now()
   const authFailureResponse = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === 'POST'
@@ -229,6 +260,17 @@ async function waitForTrendApiResponses(
     return Promise.race([requiredResponse, authFailureResponse])
   })
 
+  diagnostics.event(`api.${phase}.start`, '开始等待趋势接口响应', {
+    expected: requiredResponseSpecs.map(spec => spec.pathname),
+    ...(expectedRange ? {
+      range: {
+        num: expectedRange.num,
+        granularity: expectedRange.granularity,
+        startDate: expectedRange.startDate,
+        endDate: expectedRange.endDate,
+      },
+    } : {}),
+  })
   await trigger()
 
   const responseResults = await Promise
@@ -238,15 +280,26 @@ async function waitForTrendApiResponses(
     const rangeLabel = expectedRange
       ? `${expectedRange.num} ${expectedRange.granularity}`
       : includesCharts ? '仪表盘趋势' : '最近使用趋势'
+    diagnostics.event(`api.${phase}.timeout`, '等待趋势接口响应超时', {
+      rangeLabel,
+      durationMs: Date.now() - startedAt,
+    })
     throw new Error(`📈 等待 ${rangeLabel} 接口响应超时。`)
   }
   if (responseResults.some(result => result.kind === 'auth')) {
+    diagnostics.event(`api.${phase}.auth-failed`, '页面 refresh 接口返回认证错误', {
+      durationMs: Date.now() - startedAt,
+    })
     throw new Error('🔐 sub2api 登录态已经失效，请重新导出登录态。')
   }
 
   for (const result of responseResults) {
     if (result.kind !== 'required') continue
     const status = result.response.status()
+    diagnostics.event(`api.${phase}.response`, `${result.name}接口响应`, {
+      status,
+      durationMs: Date.now() - startedAt,
+    })
     if (status === 401 || status === 403) {
       throw new Error(`🔐 sub2api 返回 ${status}，当前登录态无权访问管理仪表盘或已经失效。`)
     }
@@ -442,10 +495,14 @@ async function dismissOnboardingTour(page: Page): Promise<void> {
 async function prepareAuthenticatedPage(
   page: Page,
   config: Config,
+  diagnostics: CaptureDiagnostics,
   forceDarkTheme = false,
 ): Promise<void> {
-  const authState = await prepareRuntimeAuthState(page, config)
+  const authState = await prepareRuntimeAuthState(page, config, diagnostics)
   await injectAuthStorage(page, authState.storage, forceDarkTheme)
+  diagnostics.event('auth.storage.injected', '登录态已注入新页面', {
+    forceDarkTheme,
+  })
 }
 
 function isRetryableAuthCaptureError(error: unknown): boolean {
@@ -453,18 +510,31 @@ function isRetryableAuthCaptureError(error: unknown): boolean {
   return /(?:sub2api 返回 40[13]|登录态已经失效|页面跳到了 \/login|refresh_token 已被轮换)/u.test(message)
 }
 
-async function captureStatusScreenshotOnce(ctx: Context, config: Config): Promise<Buffer> {
-  const page = await ctx.puppeteer.page()
+async function captureStatusScreenshotOnce(
+  ctx: Context,
+  config: Config,
+  diagnostics: CaptureDiagnostics,
+  attempt: number,
+): Promise<Buffer> {
+  let page: Page | undefined
 
   try {
+    page = await ctx.puppeteer.page()
+    diagnostics.event('page.created', '已创建状态页浏览器页面')
     const statusPageUrl = getSub2apiPageUrl(config.sub2apiBaseUrl, '/monitor')
     await page.setViewport({
       width: config.viewportWidth,
       height: config.viewportHeight,
       deviceScaleFactor: config.deviceScaleFactor,
     })
-    await prepareAuthenticatedPage(page, config)
+    diagnostics.event('page.viewport', '状态页视口设置完成', {
+      width: config.viewportWidth,
+      height: config.viewportHeight,
+      deviceScaleFactor: config.deviceScaleFactor,
+    })
+    await prepareAuthenticatedPage(page, config, diagnostics)
 
+    const navigationStartedAt = Date.now()
     const channelMonitorResponse = page.waitForResponse((response) => {
       const url = response.url()
       return response.request().method() === 'GET'
@@ -472,23 +542,46 @@ async function captureStatusScreenshotOnce(ctx: Context, config: Config): Promis
         && !url.includes('/admin/')
     }, { timeout: config.navigationTimeoutMs }).catch(() => null)
 
+    diagnostics.event('page.navigate.start', '开始导航到状态页', {
+      path: '/monitor',
+      waitUntil: config.waitUntil,
+    })
     await page.goto(statusPageUrl, {
       waitUntil: config.waitUntil,
       timeout: config.navigationTimeoutMs,
     })
+    diagnostics.event('page.navigate.ok', '状态页导航完成', {
+      durationMs: Date.now() - navigationStartedAt,
+    })
+    const selectorStartedAt = Date.now()
     await page.waitForSelector(config.waitForSelector, {
       timeout: config.navigationTimeoutMs,
     })
+    diagnostics.event('page.selector.ok', '状态页目标选择器已经出现', {
+      selector: config.waitForSelector,
+      durationMs: Date.now() - selectorStartedAt,
+    })
 
     const response = await channelMonitorResponse
+    diagnostics.event('api.channel-monitor.response', '渠道状态接口等待完成', {
+      status: response?.status() ?? null,
+      durationMs: Date.now() - navigationStartedAt,
+    })
     if (response?.status() === 401) {
       throw new Error('🔐 sub2api 返回 401，登录态已失效或 refresh_token 已被轮换。请重新导出登录态。')
     }
 
     await sleep(config.waitAfterLoadedMs)
+    diagnostics.event('page.wait.complete', '状态页额外等待完成', {
+      waitAfterLoadedMs: config.waitAfterLoadedMs,
+    })
     await dismissOnboardingTour(page)
+    diagnostics.event('page.onboarding.checked', '状态页新手引导遮罩检查完成')
 
     const currentPath = await page.evaluate(() => location.pathname)
+    diagnostics.event('page.path.checked', '状态页最终路径检查完成', {
+      path: currentPath,
+    })
     if (currentPath.startsWith('/login')) {
       throw new Error('🚪 页面跳到了 /login，说明 localStorage 登录态没有生效。')
     }
@@ -528,49 +621,122 @@ async function captureStatusScreenshotOnce(ctx: Context, config: Config): Promis
         width,
         height,
       }
+      diagnostics.event('screenshot.crop', '状态页裁剪区域计算完成', {
+        pageSize,
+        clip: screenshotOptions.clip,
+      })
     } else {
       screenshotOptions.fullPage = config.fullPage
+      diagnostics.event('screenshot.crop', '状态页不使用裁剪规则', {
+        fullPage: config.fullPage,
+      })
     }
     if (config.imageType !== 'png') {
       screenshotOptions.quality = config.imageQuality
     }
 
-    return toImageBuffer(await page.screenshot(screenshotOptions))
+    const screenshotStartedAt = Date.now()
+    diagnostics.event('screenshot.start', '开始生成状态页截图', {
+      imageType: config.imageType,
+    })
+    const image = toImageBuffer(await page.screenshot(screenshotOptions))
+    diagnostics.event('screenshot.complete', '状态页截图生成完成', {
+      bytes: image.length,
+      durationMs: Date.now() - screenshotStartedAt,
+    })
+    await diagnostics.persistSuccess(image, config.imageType, { attempt })
+    return image
+  } catch (error) {
+    await diagnostics.persistFailure(
+      error,
+      page,
+      config.imageType,
+      config.imageQuality,
+      { attempt },
+    )
+    throw error
   } finally {
-    await syncRuntimeAuthStateFromPage(page, config).catch(() => undefined)
-    await page.close().catch(() => undefined)
+    if (page) {
+      await syncRuntimeAuthStateFromPage(page, config, diagnostics).catch((error) => {
+        diagnostics.event('auth.sync.failed', '页面登录态回收失败', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+      await page.close().then(() => {
+        diagnostics.event('page.closed', '状态页浏览器页面已经关闭')
+      }).catch((error) => {
+        diagnostics.event('page.close.failed', '状态页浏览器页面关闭失败', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+    }
   }
 }
 
 export async function captureStatusScreenshot(ctx: Context, config: Config): Promise<Buffer> {
+  const diagnostics = createCaptureDiagnostics(ctx, 'status', config, {
+    waitUntil: config.waitUntil,
+    waitAfterLoadedMs: config.waitAfterLoadedMs,
+    navigationTimeoutMs: config.navigationTimeoutMs,
+    deviceScaleFactor: config.deviceScaleFactor,
+    viewportWidth: config.viewportWidth,
+    viewportHeight: config.viewportHeight,
+    waitForSelector: config.waitForSelector,
+    fullPage: config.fullPage,
+    cropRules: config.cropRules,
+    imageType: config.imageType,
+    imageQuality: config.imageQuality,
+    autoRelogin: config.enableAutoRelogin,
+  })
+  diagnostics.startAttempt(1, { kind: 'status' })
   try {
-    return await captureStatusScreenshotOnce(ctx, config)
+    return await captureStatusScreenshotOnce(ctx, config, diagnostics, 1)
   } catch (error) {
     if (!config.enableAutoRelogin || !isRetryableAuthCaptureError(error)) throw error
+    diagnostics.event('capture.retry', '检测到可恢复认证错误，准备刷新登录态后重试', {
+      failedAttempt: 1,
+    })
     markRuntimeAuthStateStale(config)
-    return captureStatusScreenshotOnce(ctx, config)
+    diagnostics.startAttempt(2, { kind: 'status', previousAttemptFailed: true })
+    return captureStatusScreenshotOnce(ctx, config, diagnostics, 2)
   }
 }
 
 async function captureTrendScreenshotOnce(
   ctx: Context,
   config: Config,
+  diagnostics: CaptureDiagnostics,
+  attempt: number,
   num?: number,
   unit?: string,
 ): Promise<Buffer> {
-  const timeRange = resolveTrendTimeRange(num, unit)
-  const screenshotRegions = resolveTrendScreenshotRegions(config.trendScreenshotRange)
-  const includesCharts = screenshotRegions.includes('charts')
-  const page = await ctx.puppeteer.page()
+  let page: Page | undefined
 
   try {
+    const timeRange = resolveTrendTimeRange(num, unit)
+    const screenshotRegions = resolveTrendScreenshotRegions(config.trendScreenshotRange)
+    const includesCharts = screenshotRegions.includes('charts')
+    diagnostics.event('trend.range.resolved', '趋势时间与截图范围解析完成', {
+      num: timeRange.num,
+      granularity: timeRange.granularity,
+      startDate: timeRange.startDate,
+      endDate: timeRange.endDate,
+      regions: screenshotRegions,
+    })
+    page = await ctx.puppeteer.page()
+    diagnostics.event('page.created', '已创建趋势页浏览器页面')
     const dashboardUrl = getSub2apiPageUrl(config.sub2apiBaseUrl, '/admin/dashboard')
     await page.setViewport({
       width: TREND_VIEWPORT_WIDTH,
       height: TREND_VIEWPORT_HEIGHT,
       deviceScaleFactor: config.deviceScaleFactor,
     })
-    await prepareAuthenticatedPage(page, config, true)
+    diagnostics.event('page.viewport', '趋势页视口设置完成', {
+      width: TREND_VIEWPORT_WIDTH,
+      height: TREND_VIEWPORT_HEIGHT,
+      deviceScaleFactor: config.deviceScaleFactor,
+    })
+    await prepareAuthenticatedPage(page, config, diagnostics, true)
 
     await waitForTrendApiResponses(
       page,
@@ -581,8 +747,14 @@ async function captureTrendScreenshotOnce(
         waitUntil: config.waitUntil,
         timeout: config.navigationTimeoutMs,
       }),
+      diagnostics,
+      'initial',
     )
+    diagnostics.event('page.navigate.ok', '趋势页首次导航与接口加载完成', {
+      path: '/admin/dashboard',
+    })
 
+    const markerStartedAt = Date.now()
     await page.waitForFunction(() => {
       const headings = Array.from(document.querySelectorAll('h3'))
       const heading = headings.find((element) => {
@@ -599,11 +771,20 @@ async function captureTrendScreenshotOnce(
       filter?.setAttribute('data-sub2api-trend-filter', 'true')
       return true
     }, { timeout: config.navigationTimeoutMs })
+    diagnostics.event('page.regions.marked', '趋势页 A/B/C 区域定位完成', {
+      durationMs: Date.now() - markerStartedAt,
+    })
 
     await sleep(Math.max(config.waitAfterLoadedMs, 1200))
     await dismissOnboardingTour(page)
+    diagnostics.event('page.onboarding.checked', '趋势页新手引导遮罩检查完成', {
+      waitAfterLoadedMs: Math.max(config.waitAfterLoadedMs, 1200),
+    })
 
     const currentPath = await page.evaluate(() => location.pathname)
+    diagnostics.event('page.path.checked', '趋势页最终路径检查完成', {
+      path: currentPath,
+    })
     if (currentPath.startsWith('/login')) {
       throw new Error('🚪 页面跳到了 /login，说明 localStorage 登录态没有生效。')
     }
@@ -614,21 +795,35 @@ async function captureTrendScreenshotOnce(
       includesCharts,
       timeRange,
       () => applyTrendTimeRange(page, timeRange, config.navigationTimeoutMs),
+      diagnostics,
+      'range',
     )
     await sleep(Math.max(config.waitAfterLoadedMs, 1200))
+    diagnostics.event('trend.range.applied', '趋势时间范围已经应用并完成额外等待', {
+      waitAfterLoadedMs: Math.max(config.waitAfterLoadedMs, 1200),
+    })
 
     const trendCard = await page.$('[data-sub2api-trend-card="true"]')
     if (!trendCard) {
       throw new Error('🎯 找不到最近使用趋势图表组件。')
     }
     const canvasWaitTimeoutMs = Math.min(config.navigationTimeoutMs, 10000)
-    const hasRenderableCanvas = await waitForStableCanvases(
+    const recentCanvasResult = await waitForStableCanvases(
       page,
       TREND_REGION_SELECTORS.recent,
       1,
       canvasWaitTimeoutMs,
     )
-    if (!hasRenderableCanvas) {
+    diagnostics.event(
+      recentCanvasResult.stable ? 'canvas.recent.stable' : 'canvas.recent.timeout',
+      recentCanvasResult.stable ? '最近使用 Canvas 已稳定' : '最近使用 Canvas 稳定等待超时',
+      {
+        polls: recentCanvasResult.polls,
+        durationMs: recentCanvasResult.durationMs,
+        probes: recentCanvasResult.probes,
+      },
+    )
+    if (!recentCanvasResult.stable) {
       throw new Error('📭 最近使用趋势暂无数据。')
     }
 
@@ -637,13 +832,22 @@ async function captureTrendScreenshotOnce(
       if (!charts) {
         throw new Error('🎯 找不到模型分布与 Token 使用趋势区域。')
       }
-      const hasRenderableCharts = await waitForStableCanvases(
+      const chartCanvasResult = await waitForStableCanvases(
         page,
         TREND_REGION_SELECTORS.charts,
         2,
         canvasWaitTimeoutMs,
       )
-      if (!hasRenderableCharts) {
+      diagnostics.event(
+        chartCanvasResult.stable ? 'canvas.charts.stable' : 'canvas.charts.timeout',
+        chartCanvasResult.stable ? '模型分布与 Token 趋势 Canvas 已稳定' : '模型分布与 Token 趋势 Canvas 稳定等待超时',
+        {
+          polls: chartCanvasResult.polls,
+          durationMs: chartCanvasResult.durationMs,
+          probes: chartCanvasResult.probes,
+        },
+      )
+      if (!chartCanvasResult.stable) {
         throw new Error('📭 模型分布或 Token 使用趋势暂无可截图数据。')
       }
     }
@@ -675,6 +879,10 @@ async function captureTrendScreenshotOnce(
       throw new Error('🎯 找不到所选的完整趋势截图区域，sub2api 页面结构可能已经变化。')
     }
     const clip = mergeTrendScreenshotRects(regionRects as TrendScreenshotRect[])
+    diagnostics.event('screenshot.clip', '趋势截图联合区域计算完成', {
+      regions: screenshotRegions,
+      clip,
+    })
 
     const screenshotOptions: any = {
       type: config.imageType,
@@ -685,10 +893,51 @@ async function captureTrendScreenshotOnce(
       screenshotOptions.quality = config.imageQuality
     }
 
-    return toImageBuffer(await page.screenshot(screenshotOptions))
+    const screenshotStartedAt = Date.now()
+    diagnostics.event('screenshot.start', '开始生成趋势截图', {
+      imageType: config.imageType,
+    })
+    const image = toImageBuffer(await page.screenshot(screenshotOptions))
+    diagnostics.event('screenshot.complete', '趋势截图生成完成', {
+      bytes: image.length,
+      durationMs: Date.now() - screenshotStartedAt,
+    })
+    await diagnostics.persistSuccess(image, config.imageType, {
+      attempt,
+      range: {
+        num: timeRange.num,
+        granularity: timeRange.granularity,
+        startDate: timeRange.startDate,
+        endDate: timeRange.endDate,
+      },
+      regions: screenshotRegions,
+      clip,
+    })
+    return image
+  } catch (error) {
+    await diagnostics.persistFailure(
+      error,
+      page,
+      config.imageType,
+      config.imageQuality,
+      { attempt, num: num ?? 24, unit: unit ?? 'hour' },
+    )
+    throw error
   } finally {
-    await syncRuntimeAuthStateFromPage(page, config).catch(() => undefined)
-    await page.close().catch(() => undefined)
+    if (page) {
+      await syncRuntimeAuthStateFromPage(page, config, diagnostics).catch((error) => {
+        diagnostics.event('auth.sync.failed', '页面登录态回收失败', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+      await page.close().then(() => {
+        diagnostics.event('page.closed', '趋势页浏览器页面已经关闭')
+      }).catch((error) => {
+        diagnostics.event('page.close.failed', '趋势页浏览器页面关闭失败', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+    }
   }
 }
 
@@ -698,11 +947,30 @@ export async function captureTrendScreenshot(
   num?: number,
   unit?: string,
 ): Promise<Buffer> {
+  const diagnostics = createCaptureDiagnostics(ctx, 'trend', config, {
+    waitUntil: config.waitUntil,
+    waitAfterLoadedMs: config.waitAfterLoadedMs,
+    navigationTimeoutMs: config.navigationTimeoutMs,
+    deviceScaleFactor: config.deviceScaleFactor,
+    viewportWidth: TREND_VIEWPORT_WIDTH,
+    viewportHeight: TREND_VIEWPORT_HEIGHT,
+    trendScreenshotRange: config.trendScreenshotRange,
+    imageType: config.imageType,
+    imageQuality: config.imageQuality,
+    autoRelogin: config.enableAutoRelogin,
+    requestedNum: num ?? 24,
+    requestedUnit: unit ?? 'hour',
+  })
+  diagnostics.startAttempt(1, { kind: 'trend' })
   try {
-    return await captureTrendScreenshotOnce(ctx, config, num, unit)
+    return await captureTrendScreenshotOnce(ctx, config, diagnostics, 1, num, unit)
   } catch (error) {
     if (!config.enableAutoRelogin || !isRetryableAuthCaptureError(error)) throw error
+    diagnostics.event('capture.retry', '检测到可恢复认证错误，准备刷新登录态后重试', {
+      failedAttempt: 1,
+    })
     markRuntimeAuthStateStale(config)
-    return captureTrendScreenshotOnce(ctx, config, num, unit)
+    diagnostics.startAttempt(2, { kind: 'trend', previousAttemptFailed: true })
+    return captureTrendScreenshotOnce(ctx, config, diagnostics, 2, num, unit)
   }
 }

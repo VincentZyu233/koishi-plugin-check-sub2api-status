@@ -1,6 +1,7 @@
 import type { Page } from 'puppeteer-core'
 
 import type { Config } from './config'
+import type { DiagnosticSink } from './diagnostics'
 import { LOCAL_STORAGE_KEYS } from './types'
 import type { AuthState, AuthStateExport, AuthStorage } from './types'
 
@@ -24,6 +25,7 @@ interface AuthApiResult<T> {
   data?: T
   message: string
   reason: string
+  timedOut: boolean
 }
 
 interface TokenPairResponse {
@@ -174,13 +176,28 @@ async function withAuthLock<T>(
   }
 }
 
-function needsTokenRefresh(session: RuntimeAuthSession): boolean {
-  if (session.forceRefresh) return true
+interface TokenRefreshDecision {
+  required: boolean
+  reason: string
+  remainingMs?: number
+}
+
+function getTokenRefreshDecision(session: RuntimeAuthSession): TokenRefreshDecision {
+  if (session.forceRefresh) return { required: true, reason: 'forced' }
   if (!session.state.storage.auth_token || session.state.storage.auth_token === 'refresh-required') {
-    return true
+    return { required: true, reason: 'missing-access-token' }
   }
   const expiresAt = Number(session.state.storage.token_expires_at)
-  return !Number.isFinite(expiresAt) || expiresAt - Date.now() <= AUTH_REFRESH_BUFFER_MS
+  if (!Number.isFinite(expiresAt)) return { required: true, reason: 'invalid-expiry' }
+  const remainingMs = expiresAt - Date.now()
+  if (remainingMs <= AUTH_REFRESH_BUFFER_MS) {
+    return {
+      required: true,
+      reason: remainingMs <= 0 ? 'expired' : 'expires-soon',
+      remainingMs,
+    }
+  }
+  return { required: false, reason: 'valid', remainingMs }
 }
 
 function apiUrl(baseUrl: string, pathname: string): string {
@@ -207,10 +224,19 @@ export async function readAuthState(config: Config): Promise<AuthState> {
   return readConfiguredAuthState(config)
 }
 
-async function openAuthOrigin(page: Page, config: Config): Promise<void> {
+async function openAuthOrigin(
+  page: Page,
+  config: Config,
+  diagnostics?: DiagnosticSink,
+): Promise<void> {
+  const startedAt = Date.now()
+  diagnostics?.event('auth.bootstrap.start', '打开认证同源引导地址')
   await page.goto(apiUrl(config.sub2apiBaseUrl, AUTH_BOOTSTRAP_PATH), {
     waitUntil: 'domcontentloaded',
     timeout: config.navigationTimeoutMs,
+  })
+  diagnostics?.event('auth.bootstrap.ok', '认证同源引导地址加载完成', {
+    durationMs: Date.now() - startedAt,
   })
 }
 
@@ -218,12 +244,16 @@ async function requestAuthApi<T>(
   page: Page,
   endpoint: string,
   body: Record<string, unknown>,
+  timeoutMs: number,
 ): Promise<AuthApiResult<T>> {
-  const result = await page.evaluate(async ({ endpoint, body }) => {
+  const result = await page.evaluate(async ({ endpoint, body, timeoutMs }) => {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
         credentials: 'include',
+        signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
         },
@@ -239,15 +269,19 @@ async function requestAuthApi<T>(
         status: response.status,
         payload,
         networkError: '',
+        timedOut: false,
       }
     } catch (error) {
       return {
         status: 0,
         payload: null,
         networkError: error instanceof Error ? error.message : String(error),
+        timedOut: controller.signal.aborted,
       }
+    } finally {
+      clearTimeout(timeoutId)
     }
-  }, { endpoint, body })
+  }, { endpoint, body, timeoutMs })
 
   const envelope = result.payload && typeof result.payload === 'object'
     ? result.payload as Record<string, unknown>
@@ -264,8 +298,11 @@ async function requestAuthApi<T>(
     status: result.status,
     ok,
     data,
-    message: result.networkError || message,
+    message: result.timedOut
+      ? `请求超过 ${timeoutMs}ms 未完成`
+      : result.networkError || message,
     reason,
+    timedOut: result.timedOut,
   }
 }
 
@@ -321,19 +358,46 @@ async function refreshRuntimeAuthState(
   page: Page,
   config: Config,
   session: RuntimeAuthSession,
+  diagnostics?: DiagnosticSink,
 ): Promise<AuthState | null> {
   const refreshToken = session.state.storage.refresh_token.trim()
-  if (!refreshToken) return null
+  if (!refreshToken) {
+    diagnostics?.event('auth.refresh.skip', '没有可用的 refresh token')
+    return null
+  }
 
+  const startedAt = Date.now()
+  diagnostics?.event('auth.refresh.start', '开始刷新登录态')
   const result = await requestAuthApi<TokenPairResponse>(
     page,
     apiUrl(config.sub2apiBaseUrl, AUTH_REFRESH_PATH),
     { refresh_token: refreshToken },
+    config.navigationTimeoutMs,
+  )
+  diagnostics?.event(
+    result.ok ? 'auth.refresh.ok' : 'auth.refresh.failed',
+    result.ok ? '登录态刷新成功' : '登录态刷新失败',
+    {
+      status: result.status,
+      reason: result.reason || undefined,
+      timedOut: result.timedOut,
+      durationMs: Date.now() - startedAt,
+    },
   )
   if (result.ok && result.data) {
-    return updateTokenPair(session, result.data)
+    const state = updateTokenPair(session, result.data)
+    diagnostics?.event('auth.session.updated', '运行时 token 对已经轮换', {
+      expiresAt: state.storage.token_expires_at,
+    })
+    return state
   }
-  if (isTerminalRefreshFailure(result)) return null
+  if (isTerminalRefreshFailure(result)) {
+    diagnostics?.event('auth.refresh.terminal', 'refresh token 已确定失效，准备判断密码回退', {
+      status: result.status,
+      reason: result.reason || undefined,
+    })
+    return null
+  }
   throw authApiError('刷新登录态', result)
 }
 
@@ -341,23 +405,36 @@ async function reloginRuntimeAuthState(
   page: Page,
   config: Config,
   session: RuntimeAuthSession,
+  diagnostics?: DiagnosticSink,
 ): Promise<AuthState> {
   if (!config.enableAutoRelogin) {
+    diagnostics?.event('auth.relogin.disabled', '密码重新登录未启用')
     throw new Error('🔐 sub2api 登录态已经失效，请重新导出登录态；也可以配置账号密码后启用自动刷新与重新登录。')
   }
 
   const email = typeof config.loginEmail === 'string' ? config.loginEmail.trim() : ''
   const password = typeof config.loginPassword === 'string' ? config.loginPassword : ''
   if (!email || !password) {
+    diagnostics?.event('auth.relogin.invalid-config', '密码重新登录配置不完整', {
+      emailConfigured: Boolean(email),
+      passwordConfigured: Boolean(password),
+    })
     throw new Error('🔐 已启用自动刷新与重新登录，但 loginEmail 或 loginPassword 为空。')
   }
 
   const elapsed = Date.now() - session.lastReloginFailureAt
   if (session.lastReloginFailureAt && elapsed < AUTO_RELOGIN_COOLDOWN_MS) {
     const remainingSeconds = Math.ceil((AUTO_RELOGIN_COOLDOWN_MS - elapsed) / 1000)
+    diagnostics?.event('auth.relogin.cooldown', '密码重新登录处于失败冷却期', {
+      remainingSeconds,
+    })
     throw new Error(`⏳ 自动重新登录处于失败冷却期，请在 ${remainingSeconds} 秒后重试。`)
   }
 
+  const startedAt = Date.now()
+  diagnostics?.event('auth.relogin.start', '开始使用已配置凭据重新登录', {
+    credentialsConfigured: true,
+  })
   const result = await requestAuthApi<TokenPairResponse>(
     page,
     apiUrl(config.sub2apiBaseUrl, AUTH_LOGIN_PATH),
@@ -366,9 +443,21 @@ async function reloginRuntimeAuthState(
       password,
       turnstile_token: '',
     },
+    config.navigationTimeoutMs,
+  )
+  diagnostics?.event(
+    result.ok ? 'auth.relogin.response' : 'auth.relogin.failed',
+    result.ok ? '重新登录接口返回成功' : '重新登录接口返回失败',
+    {
+      status: result.status,
+      reason: result.reason || undefined,
+      timedOut: result.timedOut,
+      durationMs: Date.now() - startedAt,
+    },
   )
   if (result.ok && result.data?.requires_2fa === true) {
     session.lastReloginFailureAt = Date.now()
+    diagnostics?.event('auth.relogin.totp', '重新登录需要 TOTP 2FA，已停止自动处理')
     throw new Error('🔐 sub2api 管理员账号启用了 TOTP 2FA，无法执行无人值守自动重新登录。')
   }
   if (!result.ok || !result.data) {
@@ -379,6 +468,9 @@ async function reloginRuntimeAuthState(
   try {
     const state = updateTokenPair(session, result.data, result.data.user)
     session.lastReloginFailureAt = 0
+    diagnostics?.event('auth.relogin.ok', '密码重新登录成功并更新运行时 token 对', {
+      expiresAt: state.storage.token_expires_at,
+    })
     return state
   } catch (error) {
     session.lastReloginFailureAt = Date.now()
@@ -389,18 +481,36 @@ async function reloginRuntimeAuthState(
 export async function prepareRuntimeAuthState(
   page: Page,
   config: Config,
+  diagnostics?: DiagnosticSink,
 ): Promise<AuthState> {
   const session = getRuntimeAuthSession(config)
   validateAuthOrigin(session.state, config.sub2apiBaseUrl)
   await page.setUserAgent(resolveUserAgent(config, session.state))
+  diagnostics?.event('auth.session.ready', '登录态 Origin 与 User-Agent 校验完成', {
+    customUserAgent: Boolean(config.enableCustomUserAgent),
+    autoRelogin: Boolean(config.enableAutoRelogin),
+    refreshTokenConfigured: Boolean(session.state.storage.refresh_token.trim()),
+  })
 
+  const lockStartedAt = Date.now()
   return withAuthLock(session, async () => {
-    if (!needsTokenRefresh(session)) return cloneAuthState(session.state)
+    diagnostics?.event('auth.lock.acquired', '已取得认证互斥锁', {
+      waitMs: Date.now() - lockStartedAt,
+    })
+    const decision = getTokenRefreshDecision(session)
+    diagnostics?.event('auth.check', '完成 access token 有效期检查', {
+      refreshRequired: decision.required,
+      reason: decision.reason,
+      ...(decision.remainingMs === undefined
+        ? {}
+        : { remainingSeconds: Math.floor(decision.remainingMs / 1000) }),
+    })
+    if (!decision.required) return cloneAuthState(session.state)
 
-    await openAuthOrigin(page, config)
-    const refreshed = await refreshRuntimeAuthState(page, config, session)
+    await openAuthOrigin(page, config, diagnostics)
+    const refreshed = await refreshRuntimeAuthState(page, config, session, diagnostics)
     if (refreshed) return refreshed
-    return reloginRuntimeAuthState(page, config, session)
+    return reloginRuntimeAuthState(page, config, session, diagnostics)
   })
 }
 
@@ -412,17 +522,25 @@ export function markRuntimeAuthStateStale(config: Config): void {
 export async function syncRuntimeAuthStateFromPage(
   page: Page,
   config: Config,
+  diagnostics?: DiagnosticSink,
 ): Promise<void> {
   const session = runtimeAuthSessions.get(config)
-  if (!session) return
+  if (!session) {
+    diagnostics?.event('auth.sync.skip', '运行时认证会话尚未创建')
+    return
+  }
 
   let currentOrigin: string
   try {
     currentOrigin = new URL(page.url()).origin
   } catch {
+    diagnostics?.event('auth.sync.skip', '页面 URL 无法解析')
     return
   }
-  if (currentOrigin !== parseOrigin(config.sub2apiBaseUrl, 'sub2apiBaseUrl')) return
+  if (currentOrigin !== parseOrigin(config.sub2apiBaseUrl, 'sub2apiBaseUrl')) {
+    diagnostics?.event('auth.sync.skip', '页面 Origin 与配置不一致')
+    return
+  }
 
   const storage = await page.evaluate((keys) => {
     return Object.fromEntries(keys.map(key => [key, localStorage.getItem(key)]))
@@ -430,11 +548,17 @@ export async function syncRuntimeAuthStateFromPage(
   const authToken = storage.auth_token?.trim()
   const refreshToken = storage.refresh_token?.trim()
   const expiresAt = Number(storage.token_expires_at)
-  if (!authToken || !refreshToken || !Number.isFinite(expiresAt)) return
+  if (!authToken || !refreshToken || !Number.isFinite(expiresAt)) {
+    diagnostics?.event('auth.sync.skip', '页面没有完整的可回收 token 对')
+    return
+  }
 
   await withAuthLock(session, async () => {
     const currentExpiresAt = Number(session.state.storage.token_expires_at)
-    if (Number.isFinite(currentExpiresAt) && expiresAt < currentExpiresAt) return
+    if (Number.isFinite(currentExpiresAt) && expiresAt < currentExpiresAt) {
+      diagnostics?.event('auth.sync.skip', '页面 token 对早于当前运行时会话')
+      return
+    }
     session.state = {
       ...session.state,
       storage: {
@@ -445,5 +569,8 @@ export async function syncRuntimeAuthStateFromPage(
       },
     }
     session.forceRefresh = false
+    diagnostics?.event('auth.sync.ok', '已从页面回收最新运行时 token 对', {
+      expiresAt: String(expiresAt),
+    })
   })
 }

@@ -15,6 +15,7 @@
 ```powershell
 npm run test:onboarding
 npm run test:auth
+npm run test:diagnostics
 npm run test:trend-range
 npm run test:trend-time
 npm run test:live-status
@@ -36,6 +37,7 @@ npm run test:live-trend -- --help
 | --- | --- | --- |
 | `regression/onboarding-tour.mjs` | `test:onboarding` | 引导完成标记、官方关闭按钮、Escape 与遮罩清理 |
 | `regression/auth-auto-relogin.mjs` | `test:auth` | token 轮换、密码回退、TOTP、互斥、冷却、Origin 校验 |
+| `regression/diagnostics.mjs` | `test:diagnostics` | 成功/失败现场、latest 文件、滚动保留、重试恢复标记与敏感信息脱敏 |
 | `regression/trend-screenshot-range.mjs` | `test:trend-range` | A/B/C 范围、矩形合并、配置分组、emoji、Canvas 稳定等待 |
 | `regression/trend-time-range.mjs` | `test:trend-time` | 默认范围、小时/天别名、自然日与范围限制 |
 
@@ -60,6 +62,8 @@ npm run test:live-trend -- --help
 --wait-until <mode>  --wait-after-loaded-ms <ms>
 --navigation-timeout-ms <ms>  --device-scale-factor <num>
 --image-type <png|jpeg|webp>  --image-quality <1-100>
+--verbose-console-log <bool>  --verbose-file-log <bool>
+--verbose-file-log-retention <int>
 ```
 
 状态页参数：`--viewport-width`、`--viewport-height`、`--wait-for-selector`、`--[no-]full-page`、`--crop-rules-json`。
@@ -86,3 +90,4 @@ npm run test:live-trend -- --num 7 --unit day
 - 提交前检查 `git status`，确认 `output/` 仍被忽略。
 - 实拍会访问真实管理接口，不要在生产高峰期使用过大的 `--count`。
 - 认证错误会中止剩余批次，避免持续刷新或登录。
+- 文件诊断默认写入 Koishi 根目录的 `cache/check-sub2api-status/diagnostics/`，图片可能包含仪表盘内容。

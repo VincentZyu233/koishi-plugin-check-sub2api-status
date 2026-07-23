@@ -180,10 +180,19 @@ async function assertConfigDescriptionsHaveEmoji() {
   const sharedScaleFactorUsages = puppeteerSource.match(
     /deviceScaleFactor:\s*config\.deviceScaleFactor/gu,
   ) || []
-  assert.equal(
-    sharedScaleFactorUsages.length,
-    2,
-    'status and trend screenshots should both use config.deviceScaleFactor',
+  assert.ok(
+    sharedScaleFactorUsages.length >= 2,
+    'status and trend screenshots should both use config.deviceScaleFactor, including diagnostics snapshots',
+  )
+  assert.match(
+    source,
+    /verboseFileLogPathRelativeToBaseDir:[\s\S]*?\.disabled\(\)/u,
+    'the diagnostic path must remain a read-only display field',
+  )
+  assert.match(
+    source,
+    /VERBOSE_FILE_LOG_PATH_RELATIVE_TO_BASE_DIR[\s\S]*?'cache'[\s\S]*?'check-sub2api-status'[\s\S]*?'diagnostics'/u,
+    'the diagnostic path should remain relative to ctx.baseDir/cache',
   )
   assert.doesNotMatch(
     puppeteerSource,

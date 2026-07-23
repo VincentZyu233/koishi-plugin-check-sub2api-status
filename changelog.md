@@ -8,6 +8,18 @@
 
 ## 🚧🖼️ 未发布
 
+- ⬆️📦 版本由 `0.1.7-alpha.9+20260723` 更新为 `0.1.8-alpha.10+20260723`。
+- 🖥️🐛 将 `verboseLog` 直接更名为 `verboseConsoleLog`，不保留旧配置兼容别名。
+- 🧭🪪 每次截图生成独立 `captureId`，控制台输出认证、接口、Canvas、裁剪、重试与结果阶段摘要。
+- 📁🧪 新增 `verboseFileLog`，分别维护状态页与趋势页的最新成功、最新失败及滚动历史现场。
+- 🔢🗂️ 新增 `verboseFileLogRetention`，默认按截图类型与成功/失败组合各保留 10 组历史。
+- 📍🔒 新增只读 `verboseFileLogPathRelativeToBaseDir`，展示固定的 `cache/check-sub2api-status/diagnostics` 路径。
+- 🧾🔍 诊断 JSON 记录安全配置摘要、阶段耗时、接口状态、Canvas 探针、裁剪区域与错误信息。
+- 🖼️🚨 失败时在关闭 Puppeteer 页面前保存当前页面现场，成功时复用最终图片 Buffer。
+- 🔁🧷 首次失败后重试成功仍保留最近失败，并在成功与失败 JSON 中写入关联状态。
+- 🛡️🧹 文件日志不保存凭据、token、Cookie、请求正文、响应正文或 localStorage，并对错误文本二次脱敏。
+- ⏱️🛑 refresh/login 浏览器请求复用 `navigationTimeoutMs`，超时后通过 `AbortController` 中止并释放认证锁。
+- 🧪✅ 新增诊断文件回归测试，并扩展认证测试验证挂起请求能够按时中止。
 - 📈🎨 趋势截图不再仅凭 Canvas 宽高判断渲染完成。
 - 🧪🖼️ 新增缩略像素采样，要求每个目标 Canvas 已存在真实绘制像素。
 - ⏳📊 新增 750ms 连续像素签名稳定窗口，避开空白帧、动画中间帧与响应式 resize。

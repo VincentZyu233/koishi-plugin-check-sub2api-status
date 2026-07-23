@@ -140,6 +140,31 @@ function makePage(responses = [], initialStorage = {}) {
   }
 }
 
+function makeExecutingAuthPage(fetchImpl) {
+  let currentUrl = 'about:blank'
+  return {
+    async setUserAgent() {},
+    async goto(url) {
+      currentUrl = url
+    },
+    url() {
+      return currentUrl
+    },
+    async evaluate(callback, payload) {
+      if (!payload || typeof payload !== 'object' || !('endpoint' in payload)) {
+        throw new Error('unexpected page.evaluate call')
+      }
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = fetchImpl
+      try {
+        return await callback(payload)
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    },
+  }
+}
+
 async function assertSchemaFields() {
   const source = await readFile(CONFIG_SOURCE, 'utf8')
   assert.match(
@@ -276,6 +301,29 @@ async function main() {
     /Origin 与 sub2apiBaseUrl 不一致/u,
   )
   assert.equal(wrongOriginPage.gotoCalls.length, 0)
+
+  // 8. The browser-side auth request must abort instead of holding the shared lock forever.
+  const timeoutConfig = makeConfig({
+    enableAutoRelogin: true,
+    loginEmail: 'admin@example.test',
+    loginPassword: 'correct-password',
+    navigationTimeoutMs: 25,
+  })
+  const timeoutPage = makeExecutingAuthPage((_url, options = {}) => {
+    return new Promise((_resolve, reject) => {
+      options.signal?.addEventListener('abort', () => {
+        const error = new Error('request aborted')
+        error.name = 'AbortError'
+        reject(error)
+      }, { once: true })
+    })
+  })
+  const timeoutStartedAt = Date.now()
+  await assert.rejects(
+    prepareRuntimeAuthState(timeoutPage, timeoutConfig),
+    /请求超过 25ms 未完成/u,
+  )
+  assert.ok(Date.now() - timeoutStartedAt < 1000, 'auth fetch timeout should release promptly')
 
   await assertSchemaFields()
   logSuccess('auth-auto-relogin：全部检查通过')

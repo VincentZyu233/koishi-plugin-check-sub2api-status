@@ -188,6 +188,39 @@ check-sub2api-status:
 
 运行期间刷新或重新登录得到的新 token 只保存在内存中，不写入 `authStateJson`、`tools/output` 或其他本地文件。Koishi 重启后会重新验证配置中的初始 refresh token；若它已经被上次运行轮换失效，则使用账号密码创建新的独立会话。
 
+### 诊断日志
+
+调试设置将控制台阶段日志与本地诊断文件分开控制。旧的 `verboseLog` 已直接更名，不保留兼容别名：
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `verboseConsoleLog` | `boolean` | `false` | 在 Koishi 控制台输出带同一 `captureId` 的认证、接口、Canvas、裁剪、重试与截图摘要 |
+| `verboseFileLog` | `boolean` | `false` | 保存成功或失败页面图片及结构化诊断 JSON；诊断图片可能包含仪表盘业务内容 |
+| `verboseFileLogRetention` | `number` | `10` | 状态页/趋势页与成功/失败四种组合分别保留的历史数量，可设置为 1–100 |
+| `verboseFileLogPathRelativeToBaseDir` | `string[]` | `cache / check-sub2api-status / diagnostics` | 禁用的只读数组，展示相对于 `ctx.baseDir` 的固定诊断目录 |
+
+文件目录固定为：
+
+```text
+<ctx.baseDir>/cache/check-sub2api-status/diagnostics/
+├─ status/
+│  ├─ latest-success.json + 图片
+│  ├─ latest-failure.json + 图片
+│  ├─ success/             # 滚动历史
+│  └─ failure/             # 滚动历史
+└─ trend/
+   ├─ latest-success.json + 图片
+   ├─ latest-failure.json + 图片
+   ├─ success/             # 滚动历史
+   └─ failure/             # 滚动历史
+```
+
+`latest-success` 与 `latest-failure` 分别更新，下一次成功不会覆盖最近失败现场。第一次截图失败但认证恢复后的第二次重试成功时，两份记录会使用同一个 `captureId`；失败 JSON 会标记 `recoveredByRetry: true`，成功 JSON 会标记 `previousAttemptFailed: true`。
+
+诊断 JSON 只记录安全配置摘要、阶段耗时、HTTP 状态、服务端 `reason`、Canvas 尺寸与采样签名、裁剪区域和错误栈。插件不会把账号、密码、access token、refresh token、Cookie、请求正文、响应正文或完整 localStorage 写入诊断文件，并会对错误文本中意外出现的 Bearer、JWT 和 refresh token 进行二次脱敏。
+
+认证 refresh/login 请求使用 `navigationTimeoutMs` 作为浏览器 `fetch` 超时。超时后请求会通过 `AbortController` 中止并释放认证互斥锁，不会让后续截图永久排队。
+
 ## 指令
 
 - `sub2api-status`：截图渠道状态页，默认启用。
@@ -250,6 +283,7 @@ sub2api 的管理仪表盘接口只接受 `YYYY-MM-DD`，结束日期还会包�
 ```powershell
 yarn test:onboarding
 yarn test:auth
+yarn test:diagnostics
 yarn test:trend-range
 yarn test:trend-time
 ```

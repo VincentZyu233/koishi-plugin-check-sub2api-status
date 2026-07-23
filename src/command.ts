@@ -8,7 +8,6 @@ interface ScreenshotCommandOptions {
   commandName: string
   description: string
   waitingText: string
-  logName: string
   capture: (...args: any[]) => Promise<Buffer>
 }
 
@@ -36,9 +35,6 @@ function registerScreenshotCommand(
         }
 
         const image = await options.capture(...args)
-        if (config.verboseLog) {
-          logger.info(`${options.logName} screenshot ok: ${image.length} bytes`)
-        }
 
         const quote = config.enableQuote && session?.messageId ? `${h.quote(session.messageId)}` : ''
         return `${quote}${h.image(image, mimeTypeOf(config.imageType))}`
@@ -60,7 +56,6 @@ export function registerStatusCommand(ctx: Context, config: Config): void {
     commandName: config.statusCommandName,
     description: '截图 sub2api 渠道状态页',
     waitingText: '📡 获取 sub2api 上游渠道状态中，请稍后... ⏳',
-    logName: 'sub2api monitor',
     capture: () => captureStatusScreenshot(ctx, config),
   })
 }
@@ -75,7 +70,6 @@ export function registerTrendCommand(ctx: Context, config: Config): void {
       '默认：不传参数时为 24 hour，只传 num 时 unit 默认为 hour。',
     ].join('\n'),
     waitingText: '📈 获取 sub2api 管理仪表盘趋势中，请稍后... ⏳',
-    logName: 'sub2api trend',
     capture: (num?: number, unit?: string) => captureTrendScreenshot(ctx, config, num, unit),
   })
 }
