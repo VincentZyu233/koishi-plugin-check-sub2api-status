@@ -190,9 +190,9 @@ export const Config: Schema<Config> = Schema.intersect([
       .role('table')
       .default([
         { direction: CROP_DIRECTIONS.TOP, pixels: 67, enabled: true },
-        { direction: CROP_DIRECTIONS.RIGHT, pixels: 288, enabled: true },
+        { direction: CROP_DIRECTIONS.RIGHT, pixels: 13, enabled: true },
         { direction: CROP_DIRECTIONS.BOTTOM, pixels: 456, enabled: true },
-        { direction: CROP_DIRECTIONS.LEFT, pixels: 20, enabled: true },
+        { direction: CROP_DIRECTIONS.LEFT, pixels: 13, enabled: true },
       ])
       .description('📡✂️ 状态页裁剪规则；重复方向只使用靠前的第一条已启用规则'),
   }).description('📡 状态页截图设置'),
