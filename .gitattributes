@@ -1,5 +1,7 @@
 * text eol=lf
 
+*.md linguist-language=Markdown linguist-detectable=true linguist-documentation=false
+
 *.png -text
 *.jpg -text
 *.ico -text

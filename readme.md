@@ -1,8 +1,11 @@
 # koishi-plugin-check-sub2api-status
 
-[![npm](https://img.shields.io/npm/v/koishi-plugin-check-sub2api-status?style=flat-square)](https://www.npmjs.com/package/koishi-plugin-check-sub2api-status)
+[![GitHub](https://img.shields.io/badge/GitHub-VincentZyu233%2Fkoishi--plugin--check--sub2api--status-181717?style=flat-square&logo=github)](https://github.com/VincentZyu233/koishi-plugin-check-sub2api-status)
+[![Gitee](https://img.shields.io/badge/Gitee-vincent--zyu%2Fkoishi--plugin--check--sub2api--status-C71D23?style=flat-square&logo=gitee)](https://gitee.com/vincent-zyu/koishi-plugin-check-sub2api-status)
 
-检查你的sub2api中转站的状态捏
+上游项目：<https://github.com/Wei-Shaw/sub2api>
+
+用于自建 sub2api 的用户监视自己的中转站以及上游渠道的状态捏。
 
 ## 效果预览
 
